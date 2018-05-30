@@ -151,8 +151,8 @@ int parse_text(int subdir_num, char *name){    // parses a single textfile
                 map->wordCount++;                // increment total number of words found
                 wordptr = strtok(NULL, " \t");
             }
-            delete[] curline;
         }
+        delete[] curline;
     }
     // increment fileID static counter for next call
     fileID++;

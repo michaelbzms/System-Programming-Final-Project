@@ -35,7 +35,7 @@ char **directories = NULL;       // a table containing all of the docfile's dire
 int dirfilesize = -1;            // its count
 int *workerNum_to_pid = NULL;    // a table of size numWorkers in which: workerNum_to_pid[*worker_num*] = *its_pid*
 int numWorkers = -1;             // number of workers
-
+int term_width = -1;
 
 /* Global variables used by signal handlers */
 volatile bool a_worker_died = false;
@@ -64,6 +64,9 @@ int main(int argc, char *argv[]) {
         cerr << "Invalid jobExecutor parameters" << endl;
         return -1;
     }
+
+    // read term_width from webcrawler
+    CHECK_PERROR(read(STDIN_FILENO, &term_width, sizeof(int)), "read from cin", )
 
     // read directories from cin (webcrawler)
     CHECK_PERROR(read(STDIN_FILENO, &dirfilesize, sizeof(int)), "read from cin", )
@@ -895,10 +898,9 @@ bool search_management(const int numWorkers, const int *Afds, const int deadline
                             // cout << (print_counter++) << ". " << out_line << endl << endl;
 
                             // With underlining:
-                            struct winsize wsize;
-                            ioctl(STDOUT_FILENO, TIOCGWINSZ, &wsize);
-                            int term_width = wsize.ws_col;            // Get terminal width
-                            char *line = strtok(out_line, "\n");      // split line into two parts
+                            //struct winsize wsize;
+                            //ioctl(STDOUT_FILENO, TIOCGWINSZ, &wsize);  // (!) cannot get terminal width here because STDOUT_FILENO is redirected to a pipe - instead the webcrawler sends that at start up
+                            char *line = strtok(out_line, "\n");         // split line into two parts
                             cout << (print_counter++) << ". " << line << endl;
                             line = strtok(NULL, "\n");
                             print_text(line, query, query_size, term_width);

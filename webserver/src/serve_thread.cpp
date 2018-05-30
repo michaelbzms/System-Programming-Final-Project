@@ -14,7 +14,7 @@ using namespace std;
 
 #define MAX_GET_REQUEST_BUFFER_LEN 1024
 #define BUFFER_SIZE 1024                   // BUFFER SIZE FOR READING FROM FILES AS CHUNCKS
-
+#define HTTP_GET_READ_BUF_SIZE 256
 
 /* useful macros */
 #define CHECK_PERROR(call, callname, handle_code) { if ( ( call ) < 0 ) { perror(callname); handle_code } }
@@ -66,28 +66,40 @@ void *handle_http_requests(void *arguements){
 
         // handle http get request
         char http_request_str[MAX_GET_REQUEST_BUFFER_LEN];
-        int i = 0, backslashN_counter = 0;
+        int i = 0;
         ssize_t nbytes = 0;
-        while ( i < MAX_GET_REQUEST_BUFFER_LEN - 1 && backslashN_counter < 2 && ( nbytes = read(request_fd, http_request_str + i, 1) ) > 0 ){     // read char-by-char from socket until found "\n\n" or "\n\r\n" or buffer size exceeded
-            if ( *(http_request_str + i) == '\n' ){
-                backslashN_counter++;
-            } else if ( *(http_request_str + i) != '\r' ){
-                backslashN_counter = 0;    // reset
+        bool stop = false, previous_chunk_ends_in_endl = false;       // this is in case our "buffering" "cuts" the "\n\n" or "\n\r\n" in different chunks
+        while ( !stop && i < MAX_GET_REQUEST_BUFFER_LEN - 1 && ( nbytes = read(request_fd, http_request_str + i, HTTP_GET_READ_BUF_SIZE) ) > 0 ){
+            if (previous_chunk_ends_in_endl && ( http_request_str[i] == '\n' || (http_request_str[i] == '\r' && nbytes > 1 && http_request_str[i+1] == '\n') ) ){
+                i += nbytes;
+                break;
             }
-            i++;
+            // search bytes read for "\n\n" or (\r)"\n\r\n", which signals the end of the HTTP GET request
+            for (int j = 0 ; j < nbytes - 1 ; j++){
+                if ( http_request_str[i+j] == '\n' && (http_request_str[i+j+1] == '\n' || (http_request_str[i+j+1] == '\r' && j < nbytes - 2 && http_request_str[i+j+2] == '\n') ) ){
+                    stop = true;
+                    break;
+                }
+            }
+            if ( http_request_str[i+nbytes-1] == '\n' || (http_request_str[i+nbytes-2] == '\n' && http_request_str[i+nbytes-1] == '\r') ){
+                previous_chunk_ends_in_endl = true;
+            }
+            i += nbytes;
         }
-        http_request_str[i] = '\0';                 // add '\0' because read does not add it
-        if ( i == MAX_GET_REQUEST_BUFFER_LEN ){ cerr << "Warning: Did not read full HTTP GET request due to buffer size overflow" << endl; }
+        http_request_str[i] = '\0';
+        if ( i == MAX_GET_REQUEST_BUFFER_LEN ){ cerr << "Warning: Might not have read full HTTP GET request due to buffer size overflow" << endl; }
         if ( nbytes < 0 ){ perror("read on serve socket"); close(request_fd); continue; }
+
+        cout << "read HTTP GET request" << endl;
 
         CHECK_PERROR( shutdown(request_fd, SHUT_RD), "shutdown read from accepted serving socket", )   // wont read any more data
 
         char *filename = NULL;
         bool valid = check_if_valid(http_request_str, filename);    // this also returns the filename to be used if valid
         if ( !valid ){
-            // answer with a 402 bad request response
+            // answer with a 400 bad request response
             char message[512];
-            sprintf(message, "HTTP/1.1 402 Bad Request\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Sorry bro, I can only handle HTTP GET requests.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Sorry bro, I can only handle HTTP GET requests.</html>\n"));
+            sprintf(message, "HTTP/1.1 400 Bad Request\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Sorry bro, I can only handle HTTP GET requests.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Sorry bro, I can only handle HTTP GET requests.</html>\n"));
             CHECK_PERROR( write(request_fd, message, strlen(message) + 1) , "write to serving socket" , )
         }
         else {
@@ -101,12 +113,12 @@ void *handle_http_requests(void *arguements){
                 if (errno == EACCES) {                     // did not have permission for the requested file
                     // answer with a 403 http response
                     char message[512];
-                    sprintf(message, "HTTP/1.1 403 Forbidden\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Trying to access this file but don’t think I can make it.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Trying to access this file but do not think I can make it.</html>\n"));
+                    sprintf(message, "HTTP/1.1 403 Forbidden\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Trying to access this file but I do not think can make it.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Trying to access this file but I do not think can make it.</html>\n"));
                     CHECK_PERROR(write(request_fd, message, strlen(message) + 1), "write to serving socket",)
                 } else if (errno == ENOENT) {              // requested file does not exist
                     // answer with a 404 http response
                     char message[512];
-                    sprintf(message, "HTTP/1.1 404 Not Found\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Sorry dude, couldn’t find this file.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Sorry dude, could not find this file.</html>\n"));
+                    sprintf(message, "HTTP/1.1 404 Not Found\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Sorry dude, could not find this file.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Sorry dude, could not find this file.</html>\n"));
                     CHECK_PERROR(write(request_fd, message, strlen(message) + 1), "write to serving socket",)
                 } else {
                     perror("Error at fopening a requested page");

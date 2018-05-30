@@ -19,6 +19,7 @@
 using namespace std;
 
 
+#define MAX_COMMAND_SIZE 128              // any command more than 128 bytes would be illegal anyway
 #define HTTP_REQUEST_QUEUE_SIZE 128
 #define COMMAND_QUEUE_SIZE 20
 #define FLUSH_SIZE 1024
@@ -84,7 +85,7 @@ int main(int argc, char *argv[]) {
     CHECK_PERROR( bind(serving_socket_fd, (struct sockaddr *) &serving_sa, sizeof(serving_sa)) , "serving socket bind" , close(serving_socket_fd); close(command_socket_fd); delete[] root_dir; return -3; )
     CHECK_PERROR( listen(serving_socket_fd, HTTP_REQUEST_QUEUE_SIZE) , "serving socket listen" , close(serving_socket_fd); close(command_socket_fd); delete[] root_dir; return -3; )
 
-    // modify serving socket's options so that closing it will block if there is unread data until read or timeout
+    // modify serving socket's options so that closing it will block if there is not ACKed by peer data until ACKed or timeout
     struct linger ling;
     ling.l_onoff = 1;              // active
     ling.l_linger = TIME_OUT;      // after TIME_OUT seconds the connection will close by the server
@@ -94,7 +95,7 @@ int main(int argc, char *argv[]) {
 
     // create the serve request buffer and thread pool
     serve_request_buffer = new ServeRequestBuffer;
-    pthread_t *threadpool = new pthread_t[num_of_threads];   // this table shall store the id of num_of_threads threads created to read and handle HTTP GET requests from the buffer
+    pthread_t *threadpool = new pthread_t[num_of_threads];      // this table shall store the id of num_of_threads threads created to read and handle HTTP GET requests from the buffer
 
     // init buffer's cond_t, stat's mutex and THEN create num_of_thread threads
     CHECK( pthread_cond_init(&bufferIsReady, NULL) , "pthread_cond_init", close(serving_socket_fd); delete serve_request_buffer; delete[] threadpool; close(command_socket_fd); delete[] root_dir; return -4; )
@@ -106,14 +107,14 @@ int main(int argc, char *argv[]) {
     struct pollfd *pfds = new struct pollfd[3];
     pfds[0].fd = command_socket_fd;
     pfds[1].fd = serving_socket_fd;
-    pfds[2].fd = -1;       // <0 so poll will ignore this at start
+    pfds[2].fd = -1;                                // <0 so poll will ignore this at start
     pfds[0].events = pfds[1].events = pfds[2].events =  POLLIN;
     pfds[0].revents = pfds[1].revents = pfds[2].revents = 0;
     int retval;
-    int k = 0;             // index of command string
-    char command[128];
+    int k = 0;                                      // index of command string
+    char command[MAX_COMMAND_SIZE];
     for (;;) {
-        retval = poll(pfds, 3, -1);             // wait indefinitely until a TCP connection request comes
+        retval = poll(pfds, 3, -1);                 // wait indefinitely until a TCP connection request comes
         if ( retval < 0 ){
             if ( errno == EINTR && server_must_terminate ) {    // terminating signal?
                 cerr << "poll interrupted, server must terminate" << endl;
@@ -122,14 +123,15 @@ int main(int argc, char *argv[]) {
                 perror("poll() failed");
             }
         }
-        else if ( retval == 0 ){                // should never have as time-out given is < 0
+        else if ( retval == 0 ){                    // should never have as time-out given is < 0
             cerr << "Unexpected return 0 from poll" << endl;
         }
-        else {                                  // got a TCP connection request
+        else {                                      // got a TCP connection request
             // if got a command on a command connection
-            if (pfds[2].revents & POLLIN) {     // pfds[2].fd must be >= 0
-                if ( k >= 128 ){                // there is no command that big, reject it, after "flushing it" assuming no more than FLUSH_SIZE data is sent
+            if (pfds[2].revents & POLLIN) {         // pfds[2].fd must be >= 0
+                if ( k >= MAX_COMMAND_SIZE ){       // there is no command that big, reject it, after "flushing it" assuming no more than FLUSH_SIZE data is sent
                     cout << "Received illegal command (too big) " << endl;
+                    CHECK_PERROR( write(pfds[2].fd, "Illegal command\n", strlen("Illegal command\n")) , "write response to accepted command socket" , )
                     char trash[FLUSH_SIZE];
                     CHECK_PERROR( read(pfds[2].fd, trash, FLUSH_SIZE) , "read from command socket" , continue; )   // wont block cause poll got us here
                     // shall not read more than one command per connection
@@ -140,10 +142,20 @@ int main(int argc, char *argv[]) {
                 }
                 else{
                     // read command
-                    CHECK_PERROR( read(pfds[2].fd, command + k, 1 ) , "read from command socket" , continue; )
-                    if ( command[k] == '\n' ){
-                        if ( k > 0 && command[k-1] == '\r' ) command[k-1] = '\0';
-                        else command[k] = '\0';
+                    ssize_t nbytes = 0;
+                    CHECK_PERROR( ( nbytes = read(pfds[2].fd, command + k, MAX_COMMAND_SIZE - k) ) , "read from command socket" , continue; )
+                    bool found_endl = false;
+                    int pos = -1;
+                    for (int j = k ; j < k + nbytes ; j++){             // search the whole nbytes, not just the end, just to be safe. User may sent garbage after the first '\n'
+                        if ( command[j] == '\n' ) {
+                            found_endl = true;
+                            pos = j;
+                            break;
+                        }
+                    }
+                    if ( found_endl ){
+                        if ( pos > 0 && command[pos-1] == '\r' ) command[pos-1] = '\0';
+                        else command[pos] = '\0';
                         // handle command
                         if ( strcmp(command, "SHUTDOWN") == 0 ){
                             cout << "received SHUTDOWN command" << endl;
@@ -160,19 +172,19 @@ int main(int argc, char *argv[]) {
                             CHECK( pthread_mutex_lock(&stat_lock), "pthread_mutex_lock",  )
                             sprintf(response, "Server has been up for %.2zu:%.2zu:%.2zu, served %u pages, %u bytes\n", Dt / 3600, (Dt % 3600) / 60 , (Dt % 60), total_pages_returned, total_bytes_returned);
                             CHECK( pthread_mutex_unlock(&stat_lock), "pthread_mutex_unlock",  )
-                            write(pfds[2].fd, response, strlen(response));
+                            CHECK_PERROR( write(pfds[2].fd, response, strlen(response)) , "write response to accepted command socket" , )
                         }
                         else {
                             cout << "Received illegal command: " << command << endl;     // (!) keep in mind that white spaces sent are also considered illegal
-                            write(pfds[2].fd, "illegal command\n", strlen("illegal command\n"));
+                            CHECK_PERROR( write(pfds[2].fd, "Illegal command\n", strlen("Illegal command\n")) , "write response to accepted command socket" , )
                         }
                         // shall not read more than one command per connection
                         CHECK_PERROR( close(pfds[2].fd) , "close new (command) connection", );
                         pfds[2].fd = -1;                // reset this to < 0 so that a new connection can be accepted
                         pfds[2].revents = 0;            // reset revents field
                         k = 0;                          // reset k (!)
-                    } else {         // else keep reading char-by-char
-                        k++;
+                    } else {                            // else keep reading until that '\n' or '\r\n'
+                        k += nbytes;
                     }
                 }
             }
@@ -195,8 +207,8 @@ int main(int argc, char *argv[]) {
                 CHECK_PERROR((new_connection = accept(serving_socket_fd, (struct sockaddr *) &incoming_sa, &len)), "accept on serving socket failed unexpectedly", break; )
                 cout << "Server accepted a (serving) connection from " << inet_ntoa(incoming_sa.sin_addr) << " : " << incoming_sa.sin_port << endl;
 
-                // modify new socket's options so that closing it will block if there is unread data until read or timeout
-                CHECK_PERROR(setsockopt(new_connection, SOL_SOCKET, SO_LINGER, (const void *)&ling, sizeof(ling)) , "setsockopt failed (this may cause problems for a webcrawler)" , )
+                // modify new socket's options so that closing it will block if there is not ACKed by peer data until ACKed or timeout
+                CHECK_PERROR(setsockopt(new_connection, SOL_SOCKET, SO_LINGER, (const void *)&ling, sizeof(ling)) , "setsockopt for SO_LINGER failed" , )
 
                 serve_request_buffer->acquire();             // lock the buffer
                 serve_request_buffer->push(new_connection);  // push new connection on the buffer's FIFO queue
