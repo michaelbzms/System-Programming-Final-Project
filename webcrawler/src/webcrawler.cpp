@@ -317,7 +317,25 @@ int main(int argc, char *argv[]) {
 
     delete[] pfds;
 
-    if (!monitor_forced_exit) {          // if jobExecutor was initialized in the first place
+    CHECK_PERROR( close(command_socket_fd), "closing command socket", )
+
+    void *status;
+    CHECK(pthread_join(monitor_tid, &status), "pthread_join monitor thread",)
+    if (status != NULL) { cerr << "monitor thread terminated with an unexpected status" << endl; }
+    CHECK( pthread_mutex_destroy(&crawlingFinishedLock) , "pthread_mutex_destroy" , )
+    CHECK( pthread_cond_destroy(&crawlingFinished), "pthread_cond_destroy", )
+
+    CHECK( pthread_mutex_destroy(&stat_lock) , "pthread_mutex_destroy" , )
+    CHECK( pthread_cond_destroy(&QueueIsEmpty), "pthread_cond_destroy", )
+
+    delete urlQueue;
+    delete urlHistory;
+    delete[] threadpool;
+    delete[] host_or_IP;
+    delete[] save_dir;
+    delete[] starting_url;
+
+    if (!monitor_forced_exit && alldirs->get_size() > 0) {          // if jobExecutor was initialized in the first place
         CHECK_PERROR(write(toJobExecutor_pipe, "/exit\n", strlen("/exit\n")), "write \"/exit\" to jobExecutor failed",)         // tell jobExecutor to stop
         int stat;
         waitpid(jobExecutor_pid, &stat, 0);
@@ -326,24 +344,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    CHECK_PERROR( close(command_socket_fd), "closing command socket", )
-
-    CHECK( pthread_mutex_destroy(&stat_lock) , "pthread_mutex_destroy" , )
-    CHECK( pthread_cond_destroy(&QueueIsEmpty), "pthread_cond_destroy", )
-
-    void *status;
-    CHECK(pthread_join(monitor_tid, &status), "pthread_join monitor thread",)
-    if (status != NULL) { cerr << "monitor thread terminated with an unexpected status" << endl; }
-    CHECK( pthread_mutex_destroy(&crawlingFinishedLock) , "pthread_mutex_destroy" , )
-    CHECK( pthread_cond_destroy(&crawlingFinished), "pthread_cond_destroy", )
-
-    delete urlQueue;
-    delete urlHistory;
     delete alldirs;
-    delete[] threadpool;
-    delete[] host_or_IP;
-    delete[] save_dir;
-    delete[] starting_url;
+
     return 0;
 }
 

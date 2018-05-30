@@ -17,11 +17,14 @@ using namespace std;
 
 #define BUFFER_SIZE 1024
 #define MAX_LINK_SIZE 512
+#define HEADER_READ_BUF_SIZE 128
+#define MAX_HEADER_SIZE 1024
 
 
 /* useful macros */
 #define CHECK_PERROR(call, callname, handle_code) { if ( ( call ) < 0 ) { perror(callname); handle_code } }
 #define CHECK(call, callname, handle_code) { if ( ( call ) < 0 ) { cerr << (callname) << " failed" << endl; handle_code } }
+#define MIN(A , B) ( ((A) < (B)) ? (A) : (B) )
 
 
 /* Global Variables */
@@ -87,18 +90,52 @@ void *crawl(void *arguement){
 
             CHECK_PERROR( shutdown(http_socket, SHUT_WR), "shutdown write end of http socket", )    // wont write any more data into socket
 
-            // read http response header (should not be more than 1024 Bytes
-            char response_header[1024];
-            int i = 0, backslashN_counter = 0;
-            while ( i < 1023 && backslashN_counter < 2 && read(http_socket, response_header + i, 1) > 0 ){      // read char-by-char the response header until blank line ("\n\n" or "\n\r\n")
-                if ( response_header[i] == '\n' ) { backslashN_counter++; }
-                else if ( response_header[i] != '\r' ) { backslashN_counter = 0; }
-                i++;
+            // read http response header (should not be more than 1024 Bytes)
+            char response_header[MAX_HEADER_SIZE], readbuf[HEADER_READ_BUF_SIZE];
+            size_t i = 0, finish_pos = 0;        // if read content then that starts from response_header[finish_pos]
+            ssize_t nbytes = 0;
+            bool header_finished = false, previous_chunk_ends_in_endl = false;
+            while ( !header_finished && i < MAX_HEADER_SIZE - 1 && (nbytes = read(http_socket, response_header + i, MIN(HEADER_READ_BUF_SIZE, MAX_HEADER_SIZE - i))) > 0 ){
+                if (previous_chunk_ends_in_endl && response_header[i] == '\n' ) {
+                    finish_pos = i+1;
+                    i += nbytes;
+                    break;
+                } else if ( previous_chunk_ends_in_endl && response_header[i] == '\r' && nbytes > 1 && response_header[i+1] == '\n' ) {
+                    finish_pos = i+2;
+                    i += nbytes;
+                    break;
+                } else if (nbytes > 1) previous_chunk_ends_in_endl = false;   // reset this
+                // check nbytes read for "/n/n" or "/n/r/n"
+                for (size_t j = i ; j < i + nbytes - 1 ; j++){
+                    if ( response_header[j] == '\n' && response_header[j+1] == '\n' ){
+                        header_finished = true;
+                        finish_pos = j+2;
+                        break;
+                    } else if ( response_header[j] == '\n' && response_header[j+1] == '\r' && j < i + nbytes - 2 && response_header[j+2] == '\n' ){
+                        header_finished = true;
+                        finish_pos = j+3;
+                        break;
+                    }
+                }
+                if ( response_header[i+nbytes-1] == '\n' || (nbytes > 1 && response_header[i+nbytes-2] == '\n' && response_header[i+nbytes-1] == '\r') ){
+                    previous_chunk_ends_in_endl = true;
+                }
+                i += nbytes;
             }
-            response_header[i] = '\0';                      // (!) important
-            int content_length = -1;
+            response_header[i] = '\0';
+            if ( i == MAX_HEADER_SIZE ) { cerr << "Warning: crawler thread might not have read an entire http request header" << endl; }
+            if ( nbytes < 0 ){ perror("read on from server's socket"); close(http_socket); continue; }
+
+            char first_content[HEADER_READ_BUF_SIZE];    // won't be more than this
+            first_content[0] = '\0';
+            // if finish_pos == i  then read the whole header and nothing from the content, else if:
+            if ( finish_pos < i ){                       // then read some of the content whilst reading the header
+                strcpy(first_content, response_header + finish_pos);       // copy that content to first_content char[]
+                response_header[finish_pos] = '\0';      // and "remove" it from response_header
+            }
 
             // parse response
+            int content_length = -1;
             int fb = parse_http_response(response_header, content_length);
             switch (fb){
                 case -1: cerr << "Error reading C String from string stream" << endl; break;
@@ -115,8 +152,15 @@ void *crawl(void *arguement){
             delete[] url;                                  // dont need "str" any more
             FILE *page = fopen(filepath, "w");             // fopen is thread safe - file is created if it doesnt exist, else overwritten
             int total_bytes_read = 0;
+
+            if ( first_content[0] != '\0' ){               // if a starting part of the content was read whilst reading the header then
+                size_t first_content_len = strlen(first_content);
+                total_bytes_read += first_content_len;
+                if ( fwrite(first_content, 1, first_content_len, page) < first_content_len ) { cerr << "Warning fwrite did not write all bytes" << endl; }
+            }
+
+            char buffer[BUFFER_SIZE];
             if (page != NULL) {
-                char buffer[BUFFER_SIZE];
                 ssize_t bytes_read;
                 // read content_length Bytes from server
                 while ( total_bytes_read < content_length  && (bytes_read = read(http_socket, buffer, BUFFER_SIZE)) > 0) {     // (!) could fail with errno ECONNRESET when the server closes the connection
