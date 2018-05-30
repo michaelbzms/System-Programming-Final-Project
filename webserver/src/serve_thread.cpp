@@ -73,7 +73,7 @@ void *handle_http_requests(void *arguements){
             if (previous_chunk_ends_in_endl && ( http_request_str[i] == '\n' || (http_request_str[i] == '\r' && nbytes > 1 && http_request_str[i+1] == '\n') ) ){
                 i += nbytes;
                 break;
-            }
+            } else if (nbytes > 1) previous_chunk_ends_in_endl = false;   // reset this
             // search bytes read for "\n\n" or (\r)"\n\r\n", which signals the end of the HTTP GET request
             for (int j = 0 ; j < nbytes - 1 ; j++){
                 if ( http_request_str[i+j] == '\n' && (http_request_str[i+j+1] == '\n' || (http_request_str[i+j+1] == '\r' && j < nbytes - 2 && http_request_str[i+j+2] == '\n') ) ){
@@ -81,7 +81,7 @@ void *handle_http_requests(void *arguements){
                     break;
                 }
             }
-            if ( http_request_str[i+nbytes-1] == '\n' || (http_request_str[i+nbytes-2] == '\n' && http_request_str[i+nbytes-1] == '\r') ){
+            if ( http_request_str[i+nbytes-1] == '\n' || (nbytes > 1 && http_request_str[i+nbytes-2] == '\n' && http_request_str[i+nbytes-1] == '\r') ){
                 previous_chunk_ends_in_endl = true;
             }
             i += nbytes;
