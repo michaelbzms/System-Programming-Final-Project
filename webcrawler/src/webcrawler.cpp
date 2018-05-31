@@ -112,31 +112,19 @@ int main(int argc, char *argv[]) {
         threadpool[i] = 0;
     }
 
-    // create the FIFO Queue that will be used by all threads and push starting str into it
+    // create the FIFO Queue that will be used by all threads and push starting url into it
     urlQueue = new FIFO_Queue();
-    urlQueue->push(starting_url);      // locking is not necessary yet - only one thread
+    urlQueue->push(starting_url);        // locking is not necessary yet - only one thread
 
-    // create the URL History search tree and add starting link to it
+    // create the URL History search tree (empty at start): it will contain all pages that were added to the urlQueue, in order to we make sure they're added only once
     urlHistory = new str_history();
-    urlHistory->add(starting_url);
+    urlHistory->add(starting_url);       // (atomically) add the first url to our urlHistory struct
 
-    // create the directories created History search tree and add staring link's directory to it
+    // create the directories search tree struct, where we store all site directories downloaded for the jobExecutor to use (if empty the jobExecutor should not be initialized nor used)
     alldirs = new str_history();
-    // (!) starting_url MUST be root-relative ex: /sitei/pagei_j.html
-    {   int i, save_dir_len = strlen(save_dir);
-        char *startingdir = new char[save_dir_len + strlen(starting_url) + 1];
-        strcpy(startingdir, save_dir);
-        startingdir[save_dir_len] = '/';        // combine save_dir and "sitei" with a '/' in between
-        for (i = 1 ; i < strlen(starting_url) && starting_url[i] != '/' ; i++ ){   // i = 1 -> skip 1st '/' and stop at the second one
-            startingdir[i+save_dir_len] = starting_url[i];
-        }
-        startingdir[i+save_dir_len] = '\0';
-        alldirs->add(startingdir);
-        delete[] startingdir;
-    }
 
-    cout << "Creating monitor thread..." << endl;
     // create one thread to monitor exactly when the web crawling has finished
+    cout << "Creating monitor thread..." << endl;
     struct monitor_args margs;
     margs.num_of_threads = num_of_threads;
     margs.threadpool = threadpool;
@@ -147,8 +135,8 @@ int main(int argc, char *argv[]) {
     pthread_t monitor_tid = 0;
     CHECK( pthread_create(&monitor_tid, NULL, monitor_crawling, (void *) &margs), "pthread_create monitor thread" , delete urlQueue; delete urlHistory; delete alldirs; delete[] threadpool; close(command_socket_fd); delete[] save_dir; delete[] host_or_IP; delete[] starting_url; return -5; )
 
-    cout << "Creating num_of_threads threads..." << endl;
     // create num_of_thread threads
+    cout << "Creating num_of_threads threads..." << endl;
     CHECK( pthread_cond_init(&QueueIsEmpty, NULL) , "pthread_cond_init", delete urlQueue; delete urlHistory; delete alldirs; delete[] threadpool; close(command_socket_fd); delete[] save_dir; delete[] host_or_IP; delete[] starting_url; return -6; )
     CHECK( pthread_mutex_init(&stat_lock, NULL) , "pthread_mutex_init" , delete urlQueue; delete urlHistory; delete alldirs; delete[] threadpool; close(command_socket_fd); delete[] save_dir; delete[] host_or_IP; delete[] starting_url; return -6; )
     struct args arguements(&server_sa, num_of_threads);
@@ -235,7 +223,10 @@ int main(int argc, char *argv[]) {
                 }
                 else if ( strcmp(command, "SEARCH") == 0 ){
                     cout << "received SEARCH command" << endl;
-                    if (!jobExecutorReadyForCommands){
+                    if(!jobExecutorReadyForCommands && alldirs->get_size() == 0){   // get_size is not atomic, but this is harmless since we only read the size variable (it will not affect other threads)
+                        char msg[] = "web crawler found and downloaded 0 pages, hence the SEARCH command cannot be used\n";
+                        CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
+                    } else if (!jobExecutorReadyForCommands){
                         char msg[] = "web crawling is still in progress (or jobExecutor is not initialized yet)\n";
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
                     } else if (noMoreInput){

@@ -65,7 +65,8 @@ void *crawl(void *arguement){
             }
             CHECK( pthread_mutex_unlock(&crawlingFinishedLock) , "pthread_mutex_unlock", )   // unlock crawling_has_finished's mutex
 
-            /// what if broadcast (from the monitor thread) happens after condition "!threads_must_terminate" and before pthread_cond_wait? Would we be stuck on cond_wait? -> NO because broadcast happens with the url mutex locked!
+            /// what if broadcast (from the monitor thread) happens after condition "!threads_must_terminate" and before pthread_cond_wait?
+            /// Would we be stuck on cond_wait? -> NO because broadcast happens with the urlQueue's mutex locked!
             CHECK(pthread_cond_wait(&QueueIsEmpty, &urlQueue->lock), "pthread_cond_wait",)
 
             num_of_threads_blocked--;
@@ -80,7 +81,7 @@ void *crawl(void *arguement){
         if ( url == NULL ){                             // should not happen
             cerr << "Warning: A thread tried to pop from empty FIFO Queue" << endl;
         } else{
-            // send http get request for "str"
+            // send http get request for "url"
             int http_socket;
             CHECK_PERROR( (http_socket = socket(AF_INET, SOCK_STREAM, 0)) , "socket",  continue; )
             CHECK_PERROR( connect(http_socket, (struct sockaddr *) &server_sa, sizeof(server_sa)) , "connect", close(http_socket); continue; )
@@ -90,7 +91,7 @@ void *crawl(void *arguement){
 
             CHECK_PERROR( shutdown(http_socket, SHUT_WR), "shutdown write end of http socket", )    // wont write any more data into socket
 
-            // read http response header (should not be more than 1024 Bytes)
+            // read http response header (should not be more than MAX_HEADER_SIZE Bytes)
             char response_header[MAX_HEADER_SIZE], readbuf[HEADER_READ_BUF_SIZE];
             size_t i = 0, finish_pos = 0;        // if read content then that starts from response_header[finish_pos]
             ssize_t nbytes = 0;
@@ -124,7 +125,7 @@ void *crawl(void *arguement){
             }
             response_header[i] = '\0';
             if ( i == MAX_HEADER_SIZE ) { cerr << "Warning: crawler thread might not have read an entire http request header" << endl; }
-            if ( nbytes < 0 ){ perror("read on from server's socket"); close(http_socket); continue; }
+            if ( nbytes < 0 ){ perror("read on from server's socket"); delete[] url; close(http_socket); continue; }
 
             char first_content[HEADER_READ_BUF_SIZE];    // won't be more than this
             first_content[0] = '\0';
@@ -140,16 +141,18 @@ void *crawl(void *arguement){
             switch (fb){
                 case -1: cerr << "Error reading C String from string stream" << endl; break;
                 case -2: cerr << "Unexpected http response format from server" << endl; break;
-                case -3: cout << "A thread requested a str from the server that does not exist" << endl; break;
+                case -3: cout << "A thread requested a url from the server that does not exist: " << url << endl; break;
                 case -4: cerr << "Warning: server's http response did not contain a \"Content-Length\" field" << endl; break;
             }
+            if (fb == -3) { delete[] url; close(http_socket); continue; }     // if link the url was invalid then go to the next loop (!)
+            // if threads continues here then the page we requested exists and will be downloaded
 
-            // save response's content in save_dir
-            create_subdir_if_necessary(url);               // create the "sitei" folder for the given str's page if
+            // save response's content in save_dir - url must be root-relative from now on
+            create_subdir_if_necessary(url);               // create the "sitei" folder for the given str's page if it doesn't exist. Also adds directory to the alldirs struct.
             char *filepath = new char[strlen(save_dir) + strlen(url) + 1];
             strcpy(filepath, save_dir);                    // save dir is guaranted NOT to have a '/' at the end
             strcat(filepath, url);                         // whilst "str" SHOULD have a '/' at the start
-            delete[] url;                                  // dont need "str" any more
+            delete[] url;                                  // dont need url any more
             FILE *page = fopen(filepath, "w");             // fopen is thread safe - file is created if it doesnt exist, else overwritten
             int total_bytes_read = 0;
 
@@ -239,7 +242,8 @@ int parse_http_response(const char *response, int &content_length){
     return (found_content_len ? 0 : -4);
 }
 
-void create_subdir_if_necessary(const char *url) {      // find out and create dir if it doesn't exist - urls MUST be root relative!
+void create_subdir_if_necessary(const char *url) {      // find out and create dir if it doesn't exist - urls MUST be root relative for this function to work!
+    // figure out the site directory for given root-relative url
     size_t k, url_len = strlen(url), save_dir_len = strlen(save_dir);
     char *subdir = new char[url_len + save_dir_len + 1];
     strcpy(subdir, save_dir);
@@ -249,11 +253,11 @@ void create_subdir_if_necessary(const char *url) {      // find out and create d
     }
     subdir[k + save_dir_len] = '\0';
 
-    // ATOMICALLY add subdir to alldirs but only if it's not already in it (add ensures that - no need to search seperately)
+    // ATOMICALLY add subdir to alldirs but only if it's not already in it (add ensures that - no need to search separately)
     alldirs->add(subdir);
 
     struct stat st = {0};
-    if (stat(subdir, &st) == -1) {             // if dir does not exist, then create it
+    if (stat(subdir, &st) == -1) {                     // if dir does not exist, then create it
         CHECK_PERROR( mkdir(subdir, 0755), "mkdir", )
     }
     delete[] subdir;
@@ -281,10 +285,12 @@ void crawl_for_links(char *filepath) {
                     else { CHECK_PERROR(fclose(page), "fclose", ) return; }   // should not happen
                 }
                 link[i] = '\0';
-                if ( i > 0 ) {      // found a link
-                    urlQueue->acquire();                          // SOS acquiring Queue's lock BEFORE the next if check avoids the race condition of two threads finging the same link simultaneously
+                if ( i > 0 ) {                                    // if found a link
+                    urlQueue->acquire();                          // only one thread is allowed on the following critical section
+                    // IMPORTANT: acquiring Queue's lock BEFORE the next if check avoids the race condition of two threads finding the same link simultaneously!
+                    // If I didn't use Queue's lock for this I would have to use History's lock for both, search and add, TOGETHER!
                     if ( !urlHistory->search(link) ) {            // add link to urlQueue ONLY if it doesn't exist on our urlHistory structure (aka we have not downloaded this page yet)
-                        urlHistory->add(link);
+                        urlHistory->add(link);                    // ATOMICALLY add new found link to our urlHistory struct
                         urlQueue->push(link);
                         CHECK(pthread_cond_signal(&QueueIsEmpty), "pthread_cond_signal",)      // signal ONE thread to read the new link from the urlQueue
                         cout << "added a link: " << link << endl;
