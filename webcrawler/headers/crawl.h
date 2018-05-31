@@ -11,4 +11,7 @@ struct args{
 
 void *crawl(void *arguement);
 
+int findRootRelativeUrl(const char *possibly_full_url, char *&root_relative_url);   // useful for main too
+
+
 #endif //CRAWL_H

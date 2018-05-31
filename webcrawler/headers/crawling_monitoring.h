@@ -5,7 +5,6 @@
 struct monitor_args{
     int num_of_threads, num_of_workers;
     pthread_t *threadpool;
-    char *save_dir;
 };
 
 

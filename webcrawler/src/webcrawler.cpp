@@ -33,21 +33,25 @@ using namespace std;
 #define CHECK(call, callname, handle_code) { if ( ( call ) < 0 ) { cerr << (callname) << " failed" << endl; handle_code } }
 
 
-/* Global variables */
+/*_____Global variables______*/
+/* Statistics: */
 time_t time_crawler_started;
 pthread_mutex_t stat_lock;
 unsigned int total_pages_downloaded = 0;
 unsigned int total_bytes_downloaded = 0;
+/* web crawling: */
 char *save_dir = NULL;
 pthread_cond_t QueueIsEmpty;
 bool threads_must_terminate = false;
 int num_of_threads_blocked = 0;
 FIFO_Queue *urlQueue = NULL;                 // common str Queue for all threads
 str_history *urlHistory = NULL;              // common str History for all threads (a search Tree of all the urls already downloaded during web crawling)
+/* thread monitoring: */
 bool crawling_has_finished = false;
 pthread_cond_t crawlingFinished;             // concerns boolean "crawling_has_finished"
 pthread_mutex_t crawlingFinishedLock;        // protects boolean "crawling_has_finished"
 bool monitor_forced_exit = false;
+/* jobExecutor connection: */
 bool jobExecutorReadyForCommands = false;
 pid_t jobExecutor_pid = -1;
 str_history *alldirs = NULL;                 // keep track of all directories that you have downloaded
@@ -112,13 +116,20 @@ int main(int argc, char *argv[]) {
         threadpool[i] = 0;
     }
 
-    // create the FIFO Queue that will be used by all threads and push starting url into it
+    // create the FIFO Queue that will be used by all threads and push starting url into it. This Queue can contain both: root relative urls and full http urls
     urlQueue = new FIFO_Queue();
     urlQueue->push(starting_url);        // locking is not necessary yet - only one thread
 
-    // create the URL History search tree (empty at start): it will contain all pages that were added to the urlQueue, in order to we make sure they're added only once
+    // create the URL History search tree (empty at start): it will contain ONLY the root relative urls for ALL the pages that were added to the urlQueue, in order to we make sure they're added only once
     urlHistory = new str_history();
-    urlHistory->add(starting_url);       // (atomically) add the first url to our urlHistory struct
+    char *root_relative_starting_url;
+    findRootRelativeUrl(starting_url, root_relative_starting_url);
+    if ( root_relative_starting_url == NULL ){
+        cerr << "Unexpected failure for finding the root relative link of the starting_url: " << link << endl;
+        cerr << "Did you misspell it? Adding itself to history instead..." << endl;
+        root_relative_starting_url = starting_url;
+    }
+    urlHistory->add(root_relative_starting_url);    // (atomically) add the first url to our urlHistory struct
 
     // create the directories search tree struct, where we store all site directories downloaded for the jobExecutor to use (if empty the jobExecutor should not be initialized nor used)
     alldirs = new str_history();
@@ -129,7 +140,6 @@ int main(int argc, char *argv[]) {
     margs.num_of_threads = num_of_threads;
     margs.threadpool = threadpool;
     margs.num_of_workers = NUM_OF_WORKERS;
-    margs.save_dir = save_dir;
     CHECK( pthread_cond_init(&crawlingFinished, NULL) , "pthread_cond_init", delete urlQueue; delete urlHistory; delete alldirs; delete[] threadpool; close(command_socket_fd); delete[] save_dir; delete[] host_or_IP; delete[] starting_url; return -5; )
     CHECK( pthread_mutex_init(&crawlingFinishedLock, NULL) , "pthread_mutex_init" , delete urlQueue; delete urlHistory; delete alldirs; delete[] threadpool; close(command_socket_fd); delete[] save_dir; delete[] host_or_IP; delete[] starting_url; return -5; )
     pthread_t monitor_tid = 0;
@@ -223,7 +233,7 @@ int main(int argc, char *argv[]) {
                 }
                 else if ( strcmp(command, "SEARCH") == 0 ){
                     cout << "received SEARCH command" << endl;
-                    if(!jobExecutorReadyForCommands && alldirs->get_size() == 0){   // get_size is not atomic, but this is harmless since we only read the size variable (it will not affect other threads)
+                    if (!jobExecutorReadyForCommands && alldirs->get_size() == 0){   // get_size is not atomic, but this is harmless since we only read the size variable (it will not affect other threads)
                         char msg[] = "web crawler found and downloaded 0 pages, hence the SEARCH command cannot be used\n";
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
                     } else if (!jobExecutorReadyForCommands){

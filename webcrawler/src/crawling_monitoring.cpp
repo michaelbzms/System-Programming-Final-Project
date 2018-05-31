@@ -27,6 +27,7 @@ extern bool crawling_has_finished;
 extern pthread_cond_t crawlingFinished;
 extern pthread_mutex_t crawlingFinishedLock;
 extern int num_of_threads_blocked;
+extern char *save_dir;
 extern FIFO_Queue *urlQueue;
 extern bool threads_must_terminate;
 extern pthread_cond_t QueueIsEmpty;
@@ -78,7 +79,7 @@ void *monitor_crawling(void *args){
     // Step3: initiate the jobExecutor, but only if there are directories for him to index
     if (!monitor_forced_exit && alldirs->get_size() > 0){                             // web crawling has finished here so get_size() is "atomic"
         cout << "Initiating jobExecutor..." << endl;
-        init_jobExecutor(arguements->num_of_workers, arguements->save_dir);
+        init_jobExecutor(arguements->num_of_workers, save_dir);
         cout << "jobExecutor ready for commands" << endl;
         jobExecutorReadyForCommands = true;
     }
