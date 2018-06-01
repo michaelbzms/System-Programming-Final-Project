@@ -20,10 +20,10 @@ using namespace std;
 
 
 #define MAX_COMMAND_SIZE 128              // any command more than 128 bytes would be illegal anyway
-#define HTTP_REQUEST_QUEUE_SIZE 128
-#define COMMAND_QUEUE_SIZE 20
-#define FLUSH_SIZE 1024
-#define TIME_OUT 30                       // 30 seconds timeout for each TCP serving connection
+#define HTTP_REQUEST_QUEUE_SIZE 128       // queue size for incoming serving TCP Connections
+#define COMMAND_QUEUE_SIZE 20             // queue size for incoming command TCP Connections (only one command can't be served at one time)
+#define FLUSH_SIZE 1024                   // size of the buffer used to flush any command given than was more than 128 Bytes (may or may not be necessary - not sure but I do it just in case)
+#define TIME_OUT 30                       // 30 seconds timeout for data to be ACKed in each TCP serving connection (I use the SO_LINGER option)
 
 
 /* useful macros */
@@ -33,13 +33,13 @@ using namespace std;
 
 /* Global variables */
 time_t time_server_started;
-pthread_mutex_t stat_lock;
+pthread_mutex_t stat_lock;                         // mutex that protects access of global statistics variables
 unsigned int total_pages_returned = 0;
 unsigned int total_bytes_returned = 0;
 char *root_dir = NULL;
-ServeRequestBuffer *serve_request_buffer = NULL;
-pthread_cond_t bufferIsReady;
-bool server_must_terminate  = false;
+ServeRequestBuffer *serve_request_buffer = NULL;   // a FIFO Queue of "unlimited" size is used as buffer for the accepted serving sockets' file descriptors
+pthread_cond_t bufferIsReady;                      // condition variable for whether the buffer is empty or not
+bool server_must_terminate  = false;               // used (along with a broadcast to bufferIsReady cond_t) to inform the threads to exit because the server must exit
 
 
 /* Local Functions */
@@ -71,8 +71,7 @@ int main(int argc, char *argv[]) {
     int command_socket_fd;
     CHECK_PERROR( ( command_socket_fd = socket(AF_INET, SOCK_STREAM, 0)) , "command socket" , delete[] root_dir; return -2; )
     CHECK_PERROR( bind(command_socket_fd, (struct sockaddr *) &command_sa, sizeof(command_sa)) , "command socket bind" , close(command_socket_fd); delete[] root_dir; return -2; )
-    CHECK_PERROR( listen(command_socket_fd, COMMAND_QUEUE_SIZE) , "command socket listen" , close(command_socket_fd); delete[] root_dir; return -2; )   // only one connection at a time is supported though (see code below)
-
+    CHECK_PERROR( listen(command_socket_fd, COMMAND_QUEUE_SIZE) , "command socket listen" , close(command_socket_fd); delete[] root_dir; return -2; )
     cout << "Ready to receive commands..." << endl;
 
     // create serving socket
@@ -80,17 +79,16 @@ int main(int argc, char *argv[]) {
     serving_sa.sin_family = AF_INET;
     serving_sa.sin_port = htons(serving_port);
     serving_sa.sin_addr.s_addr = htonl(INADDR_ANY);
-    int serving_socket_fd = -1;
+    int serving_socket_fd;
     CHECK_PERROR( ( serving_socket_fd = socket(AF_INET, SOCK_STREAM, 0)) , "serving socket" , close(command_socket_fd); delete[] root_dir; return -3; )
     CHECK_PERROR( bind(serving_socket_fd, (struct sockaddr *) &serving_sa, sizeof(serving_sa)) , "serving socket bind" , close(serving_socket_fd); close(command_socket_fd); delete[] root_dir; return -3; )
     CHECK_PERROR( listen(serving_socket_fd, HTTP_REQUEST_QUEUE_SIZE) , "serving socket listen" , close(serving_socket_fd); close(command_socket_fd); delete[] root_dir; return -3; )
 
-    // modify serving socket's options so that closing it will block if there is not ACKed by peer data until ACKed or timeout
+    // modify serving socket's options so that closing it will block if there is data not ACKed by peer until ACKed or timeout expires
     struct linger ling;
     ling.l_onoff = 1;              // active
     ling.l_linger = TIME_OUT;      // after TIME_OUT seconds the connection will close by the server
     CHECK_PERROR(setsockopt(serving_socket_fd, SOL_SOCKET, SO_LINGER, (const void *)&ling, sizeof(ling)) , "setsockopt" , close(serving_socket_fd); close(command_socket_fd); delete[] root_dir; return -3; )
-
     cout << "Ready to receive serving requests..." << endl;
 
     // create the serve request buffer and thread pool
@@ -107,7 +105,7 @@ int main(int argc, char *argv[]) {
     struct pollfd *pfds = new struct pollfd[3];
     pfds[0].fd = command_socket_fd;
     pfds[1].fd = serving_socket_fd;
-    pfds[2].fd = -1;                                // <0 so poll will ignore this at start
+    pfds[2].fd = -1;                                // <0 so poll will ignore this at start. The whole point of using this is to be able to handle commands as well as serving pages simultaniously
     pfds[0].events = pfds[1].events = pfds[2].events =  POLLIN;
     pfds[0].revents = pfds[1].revents = pfds[2].revents = 0;
     int retval;
@@ -119,15 +117,19 @@ int main(int argc, char *argv[]) {
             if ( errno == EINTR && server_must_terminate ) {    // terminating signal?
                 cerr << "poll interrupted, server must terminate" << endl;
                 break;
+            } else if ( errno == EINTR ){
+                cerr << "poll interrupted. Ignoring this event and blocking again..." << endl;
+                continue;
             } else {
                 perror("poll() failed");
             }
         }
         else if ( retval == 0 ){                    // should never have as time-out given is < 0
             cerr << "Unexpected return 0 from poll" << endl;
+            continue;
         }
         else {                                      // got a TCP connection request
-            // if got a command on a command connection
+            // if got a command (or part of one) on a command connection
             if (pfds[2].revents & POLLIN) {         // pfds[2].fd must be >= 0
                 if ( k >= MAX_COMMAND_SIZE ){       // there is no command that big, reject it, after "flushing it" assuming no more than FLUSH_SIZE data is sent
                     cout << "Received illegal command (too big) " << endl;
@@ -141,7 +143,7 @@ int main(int argc, char *argv[]) {
                     k = 0;                          // reset k (!)
                 }
                 else{
-                    // read command
+                    // read (possibly a part of) command
                     ssize_t nbytes = 0;
                     CHECK_PERROR( ( nbytes = read(pfds[2].fd, command + k, MAX_COMMAND_SIZE - k) ) , "read from command socket" , continue; )
                     bool found_endl = false;
@@ -153,7 +155,7 @@ int main(int argc, char *argv[]) {
                             break;
                         }
                     }
-                    if ( found_endl ){
+                    if ( found_endl ){                                 // if there was an '\n' on what we just read then the command has finished (data after the '\n' will be ignored)
                         if ( pos > 0 && command[pos-1] == '\r' ) command[pos-1] = '\0';
                         else command[pos] = '\0';
                         // handle command
@@ -161,25 +163,24 @@ int main(int argc, char *argv[]) {
                             cout << "received SHUTDOWN command" << endl;
                             server_must_terminate = true;              // set this to true so that other threads know to quit
                             pthread_cond_broadcast(&bufferIsReady);    // and then broadcast a "false" cond_t so that they get unblocked from cond_wait and see that server_must_terminate == true !
-                            // shall not read more than one command per connection
-                            CHECK_PERROR( close(pfds[2].fd) , "close new (command) connection", );
-                            break;
+                            CHECK_PERROR( close(pfds[2].fd) , "close accepted command connection", );  // close connection
+                            break;                                     // and exit the forever loop
                         }
                         else if ( strcmp(command, "STATS") == 0 ){
                             cout << "received STATS command" << endl;
                             time_t Dt = time(NULL) - time_server_started;
                             char response[256];
-                            CHECK( pthread_mutex_lock(&stat_lock), "pthread_mutex_lock",  )
+                            CHECK( pthread_mutex_lock(&stat_lock), "pthread_mutex_lock",  )            // must lock stats' mutex to access them consistently
                             sprintf(response, "Server has been up for %.2zu:%.2zu:%.2zu, served %u pages, %u bytes\n", Dt / 3600, (Dt % 3600) / 60 , (Dt % 60), total_pages_returned, total_bytes_returned);
                             CHECK( pthread_mutex_unlock(&stat_lock), "pthread_mutex_unlock",  )
                             CHECK_PERROR( write(pfds[2].fd, response, strlen(response)) , "write response to accepted command socket" , )
                         }
-                        else {
-                            cout << "Received illegal command: " << command << endl;     // (!) keep in mind that white spaces sent are also considered illegal
+                        else {   // Note: white spaces sent are also considered illegal
+                            cout << "Received illegal command: " << command << endl;
                             CHECK_PERROR( write(pfds[2].fd, "Illegal command\n", strlen("Illegal command\n")) , "write response to accepted command socket" , )
                         }
-                        // shall not read more than one command per connection
-                        CHECK_PERROR( close(pfds[2].fd) , "close new (command) connection", );
+                        // shall not read more than one command per connection. We accept one later in the code, handle it and then close it here
+                        CHECK_PERROR( close(pfds[2].fd) , "close new (command) connection", );         // close connection. If there are others blocked on "listen's" queue they will be accepted later in this loop - before blocking on poll again
                         pfds[2].fd = -1;                // reset this to < 0 so that a new connection can be accepted
                         pfds[2].revents = 0;            // reset revents field
                         k = 0;                          // reset k (!)
@@ -188,7 +189,7 @@ int main(int argc, char *argv[]) {
                     }
                 }
             }
-            // if got a command connection and there is not any other command connection pending
+            // if got a command connection and there is not any other accepted command connection pending
             if ( (pfds[0].revents & POLLIN) && pfds[2].fd < 0 ){
                 pfds[0].revents = 0;            // reset revents field
                 int new_connection;
@@ -207,12 +208,12 @@ int main(int argc, char *argv[]) {
                 CHECK_PERROR((new_connection = accept(serving_socket_fd, (struct sockaddr *) &incoming_sa, &len)), "accept on serving socket failed unexpectedly", break; )
                 cout << "Server accepted a (serving) connection from " << inet_ntoa(incoming_sa.sin_addr) << " : " << incoming_sa.sin_port << endl;
 
-                // modify new socket's options so that closing it will block if there is not ACKed by peer data until ACKed or timeout
+                // modify new socket's options so that closing it will block if there is not ACKed by TCP peer data until ACKed or timeout
                 CHECK_PERROR(setsockopt(new_connection, SOL_SOCKET, SO_LINGER, (const void *)&ling, sizeof(ling)) , "setsockopt for SO_LINGER failed" , )
 
                 serve_request_buffer->acquire();             // lock the buffer
                 serve_request_buffer->push(new_connection);  // push new connection on the buffer's FIFO queue
-                CHECK_PERROR( pthread_cond_signal(&bufferIsReady) , "pthread_cond_signal" , )     // signal the cond_t variable so that a thread can read from the buffer
+                CHECK_PERROR( pthread_cond_signal(&bufferIsReady) , "pthread_cond_signal" , )     // signal the cond_t variable so that a thread can read from the buffer (only one can make progress so signal instead of broadcast)
                 serve_request_buffer->release();             // unlock the buffer
             }
         }

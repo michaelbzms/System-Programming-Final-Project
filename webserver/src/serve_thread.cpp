@@ -12,9 +12,9 @@
 using namespace std;
 
 
-#define MAX_GET_REQUEST_BUFFER_LEN 1024
-#define BUFFER_SIZE 1024                   // BUFFER SIZE FOR READING FROM FILES AS CHUNCKS
-#define HTTP_GET_READ_BUF_SIZE 256
+#define MAX_GET_REQUEST_BUFFER_LEN 1024    // code assumes that no request bigger than this will be received. If we do get a bigger one, we will ignore any "overflown" data
+#define BUFFER_SIZE 4096                   // size of the buffer used tp read from files chunk-by-chunk
+#define HTTP_GET_READ_BUF_SIZE 256         // size of the buffer used to read the http get header
 
 /* useful macros */
 #define CHECK_PERROR(call, callname, handle_code) { if ( ( call ) < 0 ) { perror(callname); handle_code } }
@@ -32,14 +32,14 @@ extern unsigned int total_bytes_returned;
 
 
 /* Local functions */
-bool check_if_valid(char *http_request_str, char *&filename);
-char *get_current_time(struct tm *timestamp, char *date_and_time);
+bool check_if_valid(char *http_request_str, char *&filename);           // checks if http get request header is valid (1. 1st line is "HTTP/1.1 GET <link>", 2. There is a "Host:" field)
+char *get_current_time(struct tm *timestamp, char *date_and_time);      // returns a pointer to date_and_time argument which is filled with current time information according to the RFC protocol for TCP
 void buffercpy(char *dest, const char *source, size_t bytes_read);
 size_t bufferlen(const char *buf);
 
 
 /* Local data structures */
-struct chunk{
+struct chunk{                                           // we store the whole page requested on a list of these chunks so that we only read each file ONCE
     char buffer[BUFFER_SIZE];
     chunk *next;
     chunk() : next(NULL), buffer("") {}
@@ -47,9 +47,9 @@ struct chunk{
 
 
 void *handle_http_requests(void *arguements){
-    int request_fd;
-    struct tm timestamp;                                // each thread has its own
-    char date_and_time[256];
+    int request_fd;                                     // the file descriptor that is popped from the queue on every loop
+    struct tm timestamp;                                // each thread has its own, to be used by gmtime_r on get_current_time()
+    char date_and_time[256];                            // ^^ (same)
     while (!server_must_terminate){
         serve_request_buffer->acquire();                // lock the mutex
         while ( serve_request_buffer->isEmpty() ){
@@ -64,11 +64,11 @@ void *handle_http_requests(void *arguements){
         if ( request_fd < 0 ) cerr << "Warning: could not pop an element from the request buffer even though it should not be empty" << endl;
         serve_request_buffer->release();                // unlock the mutex
 
-        // handle http get request
+        // read http get request
         char http_request_str[MAX_GET_REQUEST_BUFFER_LEN];
         int i = 0;
         ssize_t nbytes = 0;
-        bool stop = false, previous_chunk_ends_in_endl = false;       // this is in case our "buffering" "cuts" the "\n\n" or "\n\r\n" in different chunks
+        bool stop = false, previous_chunk_ends_in_endl = false;       // the 2nd one is in case our "buffering" "cuts" the "\n\n" or "\n\r\n" in different chunks
         while ( !stop && i < MAX_GET_REQUEST_BUFFER_LEN - 1 && ( nbytes = read(request_fd, http_request_str + i, HTTP_GET_READ_BUF_SIZE) ) > 0 ){
             if (previous_chunk_ends_in_endl && ( http_request_str[i] == '\n' || (http_request_str[i] == '\r' && nbytes > 1 && http_request_str[i+1] == '\n') ) ){
                 i += nbytes;
@@ -89,16 +89,14 @@ void *handle_http_requests(void *arguements){
         http_request_str[i] = '\0';
         if ( i == MAX_GET_REQUEST_BUFFER_LEN ){ cerr << "Warning: Might not have read full HTTP GET request due to buffer size overflow" << endl; }
         if ( nbytes < 0 ){ perror("read on serve socket"); close(request_fd); continue; }
-
-        cout << "read HTTP GET request" << endl;
-
         CHECK_PERROR( shutdown(request_fd, SHUT_RD), "shutdown read from accepted serving socket", )   // wont read any more data
 
+        // handle http get request gotten
         char *filename = NULL;
         bool valid = check_if_valid(http_request_str, filename);    // this also returns the filename to be used if valid
-        if ( !valid ){
+        if ( !valid ){           // invalid HTTP GET request
             // answer with a 400 bad request response
-            char message[512];
+            char message[1024];
             sprintf(message, "HTTP/1.1 400 Bad Request\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Sorry bro, I can only handle HTTP GET requests.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Sorry bro, I can only handle HTTP GET requests.</html>\n"));
             CHECK_PERROR( write(request_fd, message, strlen(message) + 1) , "write to serving socket" , )
         }
@@ -125,13 +123,15 @@ void *handle_http_requests(void *arguements){
                 }
             } else {
                 // read the requested page from the disk into a chunk list in memory
+                // this is done because we have to send a header which contains their total "content_length" before we sent the file itself
+                // in this way we read the whole file sequentially only once onto memory (and then we send the header + the page over the socket in an http OK 200 answer)
                 size_t content_length = 0;
                 char buffer[BUFFER_SIZE];
                 size_t bytes_read;
                 chunk *chunklist = NULL, *temp = NULL;
                 for (;;) {                                // read file using a buffer and create a list of chunks that make up the requested page
-                    CHECK_PERROR((bytes_read = fread(buffer, 1, BUFFER_SIZE, page)), "read from page's html file", break;)
-                    if (bytes_read > 0) {
+                    CHECK_PERROR( (bytes_read = fread(buffer, 1, BUFFER_SIZE, page)), "read from page's html file", break; )
+                    if ( bytes_read > 0 ) {
                         content_length += bytes_read;
                         if (chunklist == NULL) {
                             chunklist = new chunk;
@@ -143,23 +143,23 @@ void *handle_http_requests(void *arguements){
                             buffercpy(temp->buffer, buffer, bytes_read);
                         }
                     }
-                    if (bytes_read < BUFFER_SIZE) {
+                    if ( bytes_read < BUFFER_SIZE ) {
                         break;
                     }
                 }
-                // now use that chunk list to asnwer with a 200 OK http response and the requested file as its content
+                // now use that chunk list to answer with a 200 OK http response and the requested file as its content
                 char header[512];
                 sprintf(header, "HTTP/1.1 200 OK\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n", get_current_time(&timestamp, date_and_time), content_length);
-                CHECK_PERROR(write(request_fd, header, strlen(header)), "write to serving socket", break;);
-                while (chunklist != NULL) {
+                CHECK_PERROR( write(request_fd, header, strlen(header)), "write to serving socket", break; );
+                while ( chunklist != NULL ) {
                     // the last write will contain the '\0' whilst the previous writes not, due to bufferlen
-                    CHECK_PERROR(write(request_fd, chunklist->buffer, bufferlen(chunklist->buffer)), "write to serving socket", break;)
+                    CHECK_PERROR( write(request_fd, chunklist->buffer, bufferlen(chunklist->buffer)), "write to serving socket", break; )
                     chunk *pre = chunklist;
                     chunklist = chunklist->next;
                     delete pre;
                 }
 
-                // update statistics
+                // update statistics (consistently using their lock)
                 CHECK( pthread_mutex_lock(&stat_lock), "pthread_mutex_lock",  )
                 total_pages_returned++;
                 total_bytes_returned += content_length;
@@ -170,29 +170,29 @@ void *handle_http_requests(void *arguements){
             delete[] filepath;
         }
 
-        // close the TCP connection
+        // close the accepted TCP serving connection
         CHECK_PERROR(close(request_fd) , "closing serving socket from a thread" , )
     }
-    return 0;
+    return NULL;
 }
 
 
 /* Local Functions Implementation */
-bool check_if_valid(char *http_request_str, char *&filename) {      /// This function is kind of messy but it works for all scenarios I checked it on. Should change if found time eventually.
+bool check_if_valid(char *http_request_str, char *&filename) {   // This function is kind of a mess but it works for all scenarios I checked it on. (Had I had more time I would have made it prettier)
     char *rest = http_request_str;
     bool host_field_exists = false;
     char *line;
     char *word;
     int k = 0;
-    while ((line = strtok_r(rest, "\r\n", &rest))) {         // strtok_r is thread safe. Only care about first two words
-        if (k == 0) {                                        // check if first line is an HTTP GET line
+    while ((line = strtok_r(rest, "\r\n", &rest))) {             // strtok_r is thread safe. Only care about first two words
+        if (k == 0) {                                            // check if first line is an HTTP GET line
             word = &line[0];
             int j = 0;
             size_t length =  strlen(line);
             for (int i = 0; i < length; i++) {
-                if (line[i] == ' ' || line[i] == '\t') {     // then word now points at the beginning of the word that just ended
+                if (line[i] == ' ' || line[i] == '\t') {                   // then word now points at the beginning of the word that just ended
                     line[i++] = '\0';
-                    while (line[i] == ' ' || line[i] == '\t') i++;     // ignore continuous whitespace
+                    while (line[i] == ' ' || line[i] == '\t') i++;         // ignore continuous whitespace
                     if (j == 0 && strcmp(word, "GET") != 0) {
                         return false;
                     } else if (j == 1) {
@@ -209,26 +209,26 @@ bool check_if_valid(char *http_request_str, char *&filename) {      /// This fun
                         }
                         // other filename formats will probably cause an expected error later (ex 404 Not Found)
                     } else if (j >= 2) {
-                        if ( line[i] == '\0' ){               // then this is the last word
+                        if ( line[i] == '\0' ){                // then this is the last word
                             if (strcmp(word, "HTTP/1.1") != 0){
                                 delete[] filename;
                                 return false;
                             }
                             j++;
                             break;
-                        } else {                             // else this line has more than 3 words
+                        } else {                               // else this line has more than 3 words
                             delete[] filename;
                             return false;
                         }
                     }
                     /* if (line[i] != '\0') */ j++;
                     word = &line[i];
-                } else if (i == length - 1 && strcmp(word, "HTTP/1.1") != 0){         // last word ('\0' already exists from strtok)
+                } else if (i == length - 1 && strcmp(word, "HTTP/1.1") != 0){          // last word ('\0' already exists from strtok)
                     delete[] filename;
                     return false;
                 }
             }
-            if ( j < 2 ){                                    // line has less than 3 words
+            if ( j < 2 ){                                              // line has less than 3 words
                 delete[] filename;
                 return false;
             }
@@ -256,24 +256,27 @@ bool check_if_valid(char *http_request_str, char *&filename) {      /// This fun
     }
 }
 
-void buffercpy(char *dest, const char *source, size_t bytes_read) {    // (!) both buffers must be of size BUFFER_SIZE
+
+void buffercpy(char *dest, const char *source, size_t bytes_read) {    // both buffers must be of size BUFFER_SIZE
     int i;
     for ( i = 0 ; i < BUFFER_SIZE && i < bytes_read; i++){
         dest[i] = source[i];
     }
     if ( i < BUFFER_SIZE ){   // i == bytes_read < BUFFER_SIZE
-        dest[i] = '\0';       // so that bufferlen will return the actual size of the chunk
+        dest[i] = '\0';       // so that bufferlen called on dest will return the actual size of the chunk (this '/0' will not be carried over any socket)
     }
 }
+
 
 size_t bufferlen(const char *buf){
     for (size_t i = 0 ; i < BUFFER_SIZE ; i++){
         if ( buf[i] == '\0' ){
-            return i;       // i because we do NOT want to carry the final '\0' over the socket
+            return i;        // i (over i+1) because we do NOT want to carry the final '\0' over the socket
         }
     }
     return BUFFER_SIZE;
 }
+
 
 const char *getDayName(int num){
     switch (num){
@@ -287,6 +290,7 @@ const char *getDayName(int num){
         default: return "Error";
     }
 }
+
 
 const char *getMonthName(int num){
     switch (num){
@@ -306,9 +310,10 @@ const char *getMonthName(int num){
     }
 }
 
+
 char *get_current_time(struct tm *timestamp, char *date_and_time) {    // follows the RFC prototype
     time_t now = time(NULL);
-    struct tm *timeptr = gmtime_r(&now, timestamp);                    // thread safe
+    struct tm *timeptr = gmtime_r(&now, timestamp);                    // thread safe version of gmtime_r
     sprintf(date_and_time, "%s, %.2u %s %.4u %.2u:%.2u:%.2u GMT", getDayName(timeptr->tm_wday), timeptr->tm_mday, getMonthName(timeptr->tm_mon),
             1900 + timeptr->tm_year, timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec);
     return date_and_time;
