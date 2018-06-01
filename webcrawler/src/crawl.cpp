@@ -50,7 +50,8 @@ extern str_history *alldirs;
 int parse_http_response(const char *response, int &content_length);
 void create_subdir_if_necessary(const char *url);
 int parse_url(const char *possibly_full_url,char *&root_relative_url, char *&host_or_IP, char *&port_number_str);
-void crawl_for_links(char *filepath);
+void crawl_for_links(char *filepath, const sockaddr_in &server_sa);
+sockaddr_in look_up_addr_r(const char *host_or_IP, int port);
 
 
 void *crawl(void *arguement){
@@ -85,8 +86,6 @@ void *crawl(void *arguement){
         if ( possibly_full_url == NULL ){               // should not happen
             cerr << "Warning: A thread tried to pop from empty FIFO Queue" << endl;
         } else {
-            bool shouldNotCrawlThisPage = false;
-
             // parse possibly_full_url to make root_relative_url point to the root_relative part of the first one
             char *host_or_IP = NULL, *port_str = NULL;
             int result;
@@ -121,30 +120,44 @@ void *crawl(void *arguement){
                     struct hostent hostent;
                     int h_errnop = 0, ret_val;
                     size_t bufferlen = 1024;
+                    char *work_buffer = new char[bufferlen];
                     do {
-                        char work_buffer[bufferlen];
                         ret_val = gethostbyname_r(host_or_IP, &hostent, work_buffer, bufferlen, &lookup, &h_errnop);
-                        if (h_errnop == ERANGE) bufferlen *= 2;
+                        if (h_errnop == ERANGE) {
+                            bufferlen *= 2;
+                            delete[] work_buffer;
+                            work_buffer = new char[bufferlen];
+                        }
                     } while ((h_errnop == TRY_AGAIN || h_errnop == ERANGE));
                     if (lookup == NULL || ret_val < 0) {
                         cout << "Could not find host (DNS failed) for host: " << host_or_IP << endl;
+                        delete[] work_buffer;
                         delete[] possibly_full_url;
                         delete[] host_or_IP;
                         continue;
-                    } else {
+                    } else{
                         host_sa.sin_addr = *((struct in_addr *) lookup->h_addr);        // arbitrarily pick the first address
                     }
+                    delete[] work_buffer;
                 }
                 delete[] host_or_IP;
                 server_to_query = &host_sa;
                 if ( server_to_query->sin_addr.s_addr != server_sa.sin_addr.s_addr ){   // if this link was for a different server than the one we got from the command line
-                    cout << "> Web crawler found an http link for a different server than the one in its arguments!" << endl
-                         << "  This crawler will not attempt to crawl the links in this site (lest we download the whole web), but it will try to download that specific web page" << endl;
-                    shouldNotCrawlThisPage = true;                                      // then do not crawl it lest we download too many pages from the web
+                    cout << "> Web crawler found an http URL for a different server than the one in its arguments!" << endl
+                         << "  URL: " << possibly_full_url << endl
+                         << "  This link will NOT be downloaded nor crawled as this crawler only supports links for the given server" << endl;
+                    delete[] possibly_full_url;
+                    continue;
                 }
             } else {                                         // else if link is root-relative then assume this link is for our server (the one got from command line)
                 if (port_str != NULL) delete[] port_str;     // just in case
                 server_to_query = (struct sockaddr_in *) &server_sa;
+            }
+            // After this points any HTTP GET request will be done our server (server_to_query must be == to server_sa
+            if ( server_to_query->sin_addr.s_addr != server_sa.sin_addr.s_addr || server_to_query->sin_port != server_sa.sin_port ){
+                cerr << "Unexpected warning: server_to_query was not server_sa!!!" << endl;
+                server_to_query->sin_addr.s_addr = server_sa.sin_addr.s_addr;
+                server_to_query->sin_port != server_sa.sin_port;
             }
 
             // send http get request for "root_relative_url"
@@ -158,7 +171,7 @@ void *crawl(void *arguement){
             CHECK_PERROR( shutdown(http_socket, SHUT_WR), "shutdown write end of http socket", )    // wont write any more data into socket
 
             // read http response header (should not be more than MAX_HEADER_SIZE Bytes)
-            char response_header[MAX_HEADER_SIZE], readbuf[HEADER_READ_BUF_SIZE];
+            char response_header[MAX_HEADER_SIZE];
             size_t i = 0, finish_pos = 0;        // if read content then that starts from response_header[finish_pos]
             ssize_t nbytes = 0;
             bool header_finished = false, previous_chunk_ends_in_endl = false;
@@ -190,7 +203,7 @@ void *crawl(void *arguement){
                 i += nbytes;
             }
             response_header[i] = '\0';
-            if ( i == MAX_HEADER_SIZE ) { cerr << "Warning: crawler thread might not have read an entire http request header" << endl; }
+            if ( i == MAX_HEADER_SIZE ) { cerr << "Warning: crawler thread might not have read the entire http response header" << endl; }
             if ( nbytes < 0 ){ perror("read on from server's socket"); delete[] possibly_full_url; close(http_socket); continue; }
 
             char first_content[HEADER_READ_BUF_SIZE];    // won't be more than this
@@ -255,7 +268,7 @@ void *crawl(void *arguement){
             if (threads_must_terminate) break;
 
             // crawl for more links in the page we just downloaded and add them to urlQueue while signalling one thread for each link added
-            if (!shouldNotCrawlThisPage) crawl_for_links(filepath);
+            crawl_for_links(filepath, server_sa);
 
             delete[] filepath;
         }
@@ -309,7 +322,7 @@ int parse_http_response(const char *response, int &content_length){
 }
 
 
-void create_subdir_if_necessary(const char *url) {      // find out and create dir if it doesn't exist - urls MUST be root relative for this function to work!
+void create_subdir_if_necessary(const char *url) {      // find out and create dir if it doesn't exist - urls MUST be root relative and of the form "/site/page" for this function to work!
     // figure out the site directory for given root-relative url
     size_t k, url_len = strlen(url), save_dir_len = strlen(save_dir);
     char *subdir = new char[url_len + save_dir_len + 1];
@@ -440,7 +453,7 @@ int findRootRelativeUrl(const char *possibly_full_url, char *&root_relative_url)
     return 0;
 }
 
-void crawl_for_links(char *filepath) {
+void crawl_for_links(char *filepath, const sockaddr_in &server_sa) {
     FILE *page = fopen(filepath, "r");
     if (page == NULL){
         cerr << "Error: could not open a page that was just downloaded and saved" << endl;
@@ -484,7 +497,7 @@ void crawl_for_links(char *filepath) {
                 i++;                       // advance until href or '>'
             if (webpage[i] != '>') {       // "href" detected
                 i += 4;                    // skip "href"
-                while (i < file_length && webpage[i] != '>' && webpage[i] != '"') i++;     // advance until '>' or '"'
+                while (i < file_length && webpage[i] != '>' && webpage[i] != '"') i++;               // advance until '>' or '"'
                 if (webpage[i] != '>' && i+1 < file_length) {       // link starts at webpage[i+1] !
                     i++;
                     int j = 0;
@@ -496,18 +509,44 @@ void crawl_for_links(char *filepath) {
                     link[j] = '\0';
 
                     if (j > 0) {                                    // if found a link
-                        urlQueue->acquire();                        // only one thread is allowed on the following critical section
-                        // IMPORTANT: acquiring Queue's lock BEFORE the next if check avoids the race condition of two threads finding the same link simultaneously!
-                        // If I didn't use Queue's lock for this I would have to use History's lock for both, search and add, TOGETHER!
+                        // first examine link found
+                        bool add_link_to_history = true;
                         char *root_relative_link;
                         findRootRelativeUrl(link, root_relative_link);
                         if ( root_relative_link == NULL ){
-                            cerr << "Unexcpected failure for finding the root relative link of the url: " << link << endl;
+                            cerr << "Unexpected failure for finding the root relative link of the url: " << link << endl;
                             cerr << "Adding itself to history instead..." << endl;
                             root_relative_link = link;
                         }
+                        else if ( root_relative_link != link ) {    // if link was not root_relative then examine it
+                            // The root-relative links for those URLS should NOT be added to the urlHistory
+                            // in case they conflict with the root_relative links for our server
+                            int port, res;
+                            char *host_or_IP, *port_num_str;
+                            CHECK((res = parse_url(link, root_relative_link, host_or_IP, port_num_str)), "parse url while crawling for links", )
+                            if (res == 1) {
+                                // cerr << "Warning: found a link on a page which is neither root relative nor an http:// link. Ignoring it..." << endl;
+                                // it's ok to add this link to urlQueue, it will be recognized as a false link when we pop it
+                                add_link_to_history = false;        // but do not add it to urlHistory
+                            } else if (host_or_IP != NULL ) {
+                                if (port_num_str == NULL) port = 8080;   // default port
+                                else port = atoi(port_num_str);
+                                sockaddr_in lookedUpAddr = look_up_addr_r(host_or_IP, port);
+                                if (lookedUpAddr.sin_port != server_sa.sin_port || lookedUpAddr.sin_addr.s_addr != server_sa.sin_addr.s_addr) {
+                                    // if link is not for the server specified in the command line arguments then do not add it to history
+                                    add_link_to_history = false;
+                                }
+                                delete[] host_or_IP;
+                                delete[] port_num_str;
+                            }
+                        }
+
+                        // then add it to urlQueue and, if the host of the link is the given server, to urlHistrory as well
+                        urlQueue->acquire();                        // only one thread is allowed on the following critical section
+                        // IMPORTANT: acquiring Queue's lock BEFORE the next if check avoids the race condition of two threads finding the same link simultaneously!
+                        // If I didn't use Queue's lock for this I would have to use History's lock for both, search and add, TOGETHER!
                         if (!urlHistory->search(root_relative_link)) {   // add link to urlQueue ONLY if it doesn't exist on our urlHistory structure (aka we have not downloaded this page yet)
-                            urlHistory->add(root_relative_link);    // ATOMICALLY add new found link to our urlHistory struct
+                            if (add_link_to_history) urlHistory->add(root_relative_link);           // ATOMICALLY add new found link to our urlHistory struct
                             urlQueue->push(link);
                             CHECK(pthread_cond_signal(&QueueIsEmpty), "pthread_cond_signal",)       // signal ONE thread to read the new link from the urlQueue
                             cout << "added a link: " << link << endl;
@@ -523,4 +562,37 @@ void crawl_for_links(char *filepath) {
     }
     delete[] webpage;
     CHECK_PERROR(fclose(page), "fclose",)
+}
+
+sockaddr_in look_up_addr_r(const char *host_or_IP,int port){
+    sockaddr_in resolved_address;
+    resolved_address.sin_family = AF_INET;
+    resolved_address.sin_port = htons(port);
+    struct in_addr in;
+    memset(&in, 0, sizeof(in));
+    if (inet_aton(host_or_IP, &in) == 1) {       // try parsing host_or_IP as an IP
+        resolved_address.sin_addr = in;
+    } else {                                     // else if unsuccessful then host_or_IP must be a host and not an IP after all
+        struct hostent *lookup;
+        struct hostent hostent;
+        int h_errnop = 0, ret_val;
+        size_t bufferlen = 1024;
+        char *work_buffer = new char[bufferlen];
+        do {
+            ret_val = gethostbyname_r(host_or_IP, &hostent, work_buffer, bufferlen, &lookup, &h_errnop);
+            if (h_errnop == ERANGE) {
+                bufferlen *= 2;
+                delete[] work_buffer;
+                work_buffer = new char[bufferlen];
+            }
+        } while ((h_errnop == TRY_AGAIN || h_errnop == ERANGE));
+        if (lookup == NULL || ret_val < 0) {
+            cout << "Could not find host (DNS failed) for host: " << host_or_IP << endl;
+            resolved_address.sin_addr.s_addr = 0;
+        } else{
+            resolved_address.sin_addr = *((struct in_addr *) lookup->h_addr);        // arbitrarily pick the first address
+        }
+        delete[] work_buffer;
+    }
+    return resolved_address;
 }

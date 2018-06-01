@@ -411,6 +411,21 @@ int parse_arguements(int argc, char *const *argv, char *&host_or_IP, uint16_t &s
         return -4;
     }
     // Now read last command line argument as starting str
+    int slash_counter = 0;
+    for (int i = 0 ; i < strlen(argv[argc-1]) ; i++ ){
+        if ( argv[argc-1][i] == '/' ) slash_counter++;
+    }
+    if (argv[argc-1][0] == '/' && slash_counter != 2){  // root relative links must have 2 '/'s in total: /sitei/pagei_j.html
+        cerr << "starting url is root relative but is incorect. Should be of type: /site/page.html" << endl;
+        delete[] save_dir;
+        delete[] host_or_IP;
+        return -5;
+    } else if ( slash_counter != 4 ) {                      // full http urls must have 4 '/'s in total: http://linux01.di.uoa.gr/sitei/pagei_j_html
+        cerr << "starting url is a full http URL but is incorect. Should be of type: http://hostname[:port]/site/page.html" << endl;
+        delete[] save_dir;
+        delete[] host_or_IP;
+        return -5;
+    }
     starting_url = new char[strlen(argv[argc - 1]) + 1];
     strcpy(starting_url, argv[argc - 1]);
     return 0;
