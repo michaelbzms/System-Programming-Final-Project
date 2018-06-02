@@ -18,15 +18,16 @@
 #include "../headers/crawl.h"
 #include "../headers/str_history.h"
 #include "../headers/crawling_monitoring.h"
-
+#include "../headers/executables_paths.h"
 
 using namespace std;
 
 
-#define COMMAND_QUEUE_SIZE 20
-#define NUM_OF_WORKERS 5                     // num of workers for jobExecutor
-#define MAX_SEARCH_WORD_SIZE 256
-#define MAX_LINE_SIZE 2048
+#define NUM_OF_WORKERS 5                     // number of workers for jobExecutor
+#define COMMAND_QUEUE_SIZE 20                // size of the queue for incoming TCP command connections (only one will be handled at a time)
+#define MAX_COMMAND_WORD_SIZE 256            // maximum size for a word in a command (for bigger words we will only keep the first 256 characters)
+#define BUFFER_SIZE 2048                     // size of the buffer used to read the jobExecutor's answers to commands
+
 
 /* useful macros */
 #define CHECK_PERROR(call, callname, handle_code) { if ( ( call ) < 0 ) { perror(callname); handle_code } }
@@ -36,26 +37,26 @@ using namespace std;
 /*_____Global variables______*/
 /* Statistics: */
 time_t time_crawler_started;
-pthread_mutex_t stat_lock;
+pthread_mutex_t stat_lock;                   // mutex protecting stats' variables
 unsigned int total_pages_downloaded = 0;
 unsigned int total_bytes_downloaded = 0;
 /* web crawling: */
 char *save_dir = NULL;
-pthread_cond_t QueueIsEmpty;
-bool threads_must_terminate = false;
-int num_of_threads_blocked = 0;
-FIFO_Queue *urlQueue = NULL;                 // common str Queue for all threads
-str_history *urlHistory = NULL;              // common str History for all threads (a search Tree of all the urls already downloaded during web crawling)
+pthread_cond_t QueueIsEmpty;                 // condition variable for whether or not the Queue of URLs is empty
+bool threads_must_terminate = false;         // used by the crawling_monitoring.cpp thread (along with a broadcast) to notify the other threads that they have to exit prematurely
+int num_of_threads_blocked = 0;              // number of threads blocked on cond_t QueueIsEmpty
+FIFO_Queue *urlQueue = NULL;                 // common URL Queue for all threads: stores both full http URLS and root-relative URLS
+str_history *urlHistory = NULL;              // common URL History for all threads: stores only the root-relative version of URLS concerning our server. This data structure is a search tree allowing for an O(logn) search and insertion
 /* thread monitoring: */
-bool crawling_has_finished = false;
-pthread_cond_t crawlingFinished;             // concerns boolean "crawling_has_finished"
-pthread_mutex_t crawlingFinishedLock;        // protects boolean "crawling_has_finished"
-bool monitor_forced_exit = false;
+bool crawling_has_finished = false;          // will be set to true by the last crawl.cpp thread when it's about to block with an empty urlQueue along with a signal to crawlingHasFinished cond_t
+pthread_cond_t crawlingFinished;             // The crawling_monitoring.cpp thread will block waiting on this cond_t. When notified that crawling has finished then it will in turn notify all threads to exit and initialize the jobExecutor
+pthread_mutex_t crawlingFinishedLock;        // mutex that protects boolean "crawling_has_finished"  and cond_t "crawlingFinished"
+bool monitor_forced_exit = false;            // set to true if and when we receive a SHUTDOWN command before crawling has finished along with a signal to cond_t crawlingFinished so that the crawling_monitoring.cpp thread (and the other ones) will exit.
 /* jobExecutor connection: */
-bool jobExecutorReadyForCommands = false;
-pid_t jobExecutor_pid = -1;
-str_history *alldirs = NULL;                 // keep track of all directories that you have downloaded
-extern int toJobExecutor_pipe, fromJobExecutor_pipe;
+bool jobExecutorReadyForCommands = false;    // will be set to true by the crawling_monitoring.cpp thread when (webcrawling has finished and) jobExecutor has been initialized.
+pid_t jobExecutor_pid = -1;                  // jobExecutor's pid, will be updated after fork + exec by the crawling_monitoring.cpp thread
+str_history *alldirs = NULL;                 // we keep track of all directories that the crawler has downloaded here. This way only directories downloaded in this execution will be sent to jobExecutor
+extern int toJobExecutor_pipe, fromJobExecutor_pipe;   // file descriptors for write and read end respectivelly of the two pipes used for communication with the jobExecutor
 
 
 /* Local Functions */
@@ -64,6 +65,11 @@ int parse_arguements(int argc, char *const *argv, char *&host_or_IP, uint16_t &s
 
 int main(int argc, char *argv[]) {
     time_crawler_started = time(NULL);
+    // before doing anything else make sure that our paths to executable files are correct:
+    if( access(JOBEXECUTOR_PATH, F_OK ) < -1 ) {      // if jobExecutor's executable does not exist then we cannot run this program
+        cerr << "Error: jobExecutor's executable does not exist on #defined location" << endl;
+        return -1;
+    }
     // parse main's parameters
     char *host_or_IP = NULL, *starting_url = NULL;
     uint16_t server_port = 0, command_port = 0;
@@ -118,23 +124,22 @@ int main(int argc, char *argv[]) {
 
     // create the FIFO Queue that will be used by all threads and push starting url into it. This Queue can contain both: root relative urls and full http urls
     urlQueue = new FIFO_Queue();
-    urlQueue->push(starting_url);        // locking is not necessary yet - only one thread
+    urlQueue->push(starting_url);                   // locking is not necessary yet - only one thread
 
-    // create the URL History search tree (empty at start): it will contain ONLY the root relative urls for ALL the pages that were added to the urlQueue, in order to we make sure they're added only once
+    // create the URL History search tree (empty at start): it will contain ONLY the root relative urls for ALL the pages that were added to the urlQueue and are asked from our host_or_IP server, in order to we make sure they're added only once
     urlHistory = new str_history();
     char *root_relative_starting_url;
-    findRootRelativeUrl(starting_url, root_relative_starting_url);
-    if ( root_relative_starting_url == NULL ){
+    findRootRelativeUrl(starting_url, root_relative_starting_url);    // Note: starting_url should be for host_or_IP server, but even if it is not, it's ok to add it to urlHistory here since no crawling will be done whatsoever
+    if ( root_relative_starting_url == NULL ){      // should not happen
         cerr << "Unexpected failure for finding the root relative link of the starting_url: " << link << endl;
-        cerr << "Did you misspell it? Adding itself to history instead..." << endl;
         root_relative_starting_url = starting_url;
     }
-    urlHistory->add(root_relative_starting_url);    // (atomically) add the first url to our urlHistory struct
+    urlHistory->add(root_relative_starting_url);    // (atomically although not necessary yet) add the first url to our urlHistory struct
 
     // create the directories search tree struct, where we store all site directories downloaded for the jobExecutor to use (if empty the jobExecutor should not be initialized nor used)
     alldirs = new str_history();
 
-    // create one thread to monitor exactly when the web crawling has finished
+    // create one thread to monitor EXACTLY when the web crawling has finished
     cout << "Creating monitor thread..." << endl;
     struct monitor_args margs;
     margs.num_of_threads = num_of_threads;
@@ -181,9 +186,6 @@ int main(int argc, char *argv[]) {
         } else if ( retval == 0 ){
             cerr << "Unexpected return 0 from poll" << endl;
         } else {
-
-            /// --> join with monitor thread here? (or always at exit?)
-
             if ( pfds[0].revents & POLLIN ){
                 pfds[0].revents = 0;                // reset revents field
                 int new_connection;
@@ -191,7 +193,7 @@ int main(int argc, char *argv[]) {
                 socklen_t len = sizeof(incoming_sa);
                 CHECK_PERROR((new_connection = accept(command_socket_fd, (struct sockaddr *) &incoming_sa, &len)), "accept on command socket failed unexpectedly", break; )
                 cout << "Crawler accepted a (command) connection from " << inet_ntoa(incoming_sa.sin_addr) << " : " << incoming_sa.sin_port << endl;
-                // read char-by-char until " " and consider this a command
+                // read char-by-char (should be fine, worst case is 128 reads) until " " or "\n" and consider this a command
                 bool noMoreInput = false;
                 char command[128];
                 char prev = ' ';
@@ -231,40 +233,66 @@ int main(int argc, char *argv[]) {
                     CHECK( pthread_mutex_unlock(&stat_lock), "pthread_mutex_unlock",  )
                     CHECK_PERROR( write(new_connection , response, strlen(response)), "write to accepted command socket", )
                 }
-                else if ( strcmp(command, "SEARCH") == 0 ){
-                    cout << "received SEARCH command" << endl;
+                else if ( strcmp(command, "SEARCH") == 0 || strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0 || strcmp(command, "WORDCOUNT") == 0 ) {
                     if (!jobExecutorReadyForCommands && alldirs->get_size() == 0){   // get_size is not atomic, but this is harmless since we only read the size variable (it will not affect other threads)
-                        char msg[] = "web crawler found and downloaded 0 pages, hence the SEARCH command cannot be used\n";
+                        char msg[] = "web crawler found and downloaded 0 pages, hence jobExecutor commands cannot be used\n";
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
                     } else if (!jobExecutorReadyForCommands){
                         char msg[] = "web crawling is still in progress (or jobExecutor is not initialized yet)\n";
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
-                    } else if (noMoreInput){
-                        CHECK_PERROR( write(new_connection , "no SEARCH arguments given\n", strlen("no SEARCH arguements given\n")), "write to accepted command socket", )
+                    } else if (noMoreInput && (strcmp(command, "SEARCH") == 0 || strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0)){
+                        CHECK_PERROR( write(new_connection , "no arguments given\n", strlen("no arguments given\n")), "write to accepted command socket", )
                     } else {
-                        // send /search command to jobExecutor
-                        CHECK_PERROR(write(toJobExecutor_pipe, "/search", strlen("/search")), "write to jobExecutor", )         // send "/search" command
-                        noMoreInput = false;
-                        while (!noMoreInput) {
-                            char word[MAX_SEARCH_WORD_SIZE];
-                            char prev = ' ';
-                            i = 0;
-                            while (i < MAX_SEARCH_WORD_SIZE) {
-                                CHECK_PERROR(read(new_connection, word + i, 1), "read from accepted command socket", continue;)
-                                if ( prev != ' ' && word[i] == ' ' ){
-                                    word[i] = '\0';
-                                    CHECK_PERROR(write(toJobExecutor_pipe, " ", 1), "write to jobExecutor", )                   // send a white space
-                                    CHECK_PERROR(write(toJobExecutor_pipe, word, strlen(word)), "write to jobExecutor", )       // send word to jobExecutor
-                                    break;
-                                }
-                                else if ( word[i] == '\n' ){         // last word or empty
-                                    if (i > 0) {                     // only send word if there was a word to send and not just whitespace
-                                        if (i > 0 && word[i - 1] == '\r') word[i - 1] = '\0';
-                                        else word[i] = '\0';
+                        if ( strcmp(command, "SEARCH") == 0 ){
+                            cout << "received SEARCH command" << endl;
+                            // send /search command, along with a maximum of 10 word arguments, to jobExecutor
+                            CHECK_PERROR(write(toJobExecutor_pipe, "/search", strlen("/search")), "write to jobExecutor", )         // send "/search" command
+                            noMoreInput = false;
+                            while (!noMoreInput) {
+                                char word[MAX_COMMAND_WORD_SIZE];
+                                char prev = ' ';
+                                i = 0;
+                                while (i < MAX_COMMAND_WORD_SIZE) {
+                                    CHECK_PERROR(read(new_connection, word + i, 1), "read from accepted command socket", continue;)
+                                    if ( prev != ' ' && word[i] == ' ' ){
+                                        word[i] = '\0';
                                         CHECK_PERROR(write(toJobExecutor_pipe, " ", 1), "write to jobExecutor", )                   // send a white space
                                         CHECK_PERROR(write(toJobExecutor_pipe, word, strlen(word)), "write to jobExecutor", )       // send word to jobExecutor
+                                        break;
                                     }
-                                    noMoreInput = true;
+                                    else if ( word[i] == '\n' || i == MAX_COMMAND_WORD_SIZE - 1 ){         // last word or empty
+                                        if (i > 0) {                                                       // only send word if there was a word to send and not just whitespace
+                                            if (word[i - 1] == '\r') word[i - 1] = '\0';
+                                            else word[i] = '\0';
+                                            CHECK_PERROR(write(toJobExecutor_pipe, " ", 1), "write to jobExecutor", )               // send a white space
+                                            CHECK_PERROR(write(toJobExecutor_pipe, word, strlen(word)), "write to jobExecutor", )   // send word to jobExecutor
+                                        }
+                                        noMoreInput = true;
+                                        break;
+                                    }
+                                    else if (prev == ' ' && word[i] == ' ' ){               // ignore continuous white space
+                                        continue;
+                                    }
+                                    prev = word[i];
+                                    i++;
+                                }
+                            }
+                            CHECK_PERROR(write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
+                        }
+                        else if ( strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0){
+                            cout << "received " << ((strcmp(command, "MAXCOUNT") == 0) ? "MAXCOUNT" : "MINCOUNT") << " command" << endl;
+                            // send /maxcount or /mincount command, along with one word arguement, to jobExecutor
+                            CHECK_PERROR(write(toJobExecutor_pipe, ((strcmp(command, "MAXCOUNT") == 0) ? "/maxcount" : "/mincount"), strlen("/maxcount")), "write to jobExecutor", )         // send "/maxcount" or "/mincount" command
+                            char word[MAX_COMMAND_WORD_SIZE];
+                            char prev = ' ';
+                            i = 0;
+                            while (i < MAX_COMMAND_WORD_SIZE) {
+                                CHECK_PERROR(read(new_connection, word + i, 1), "read from accepted command socket", continue;)
+                                if ( ( prev != ' ' && (word[i] == ' ' || word[i] == '\n') ) || i == MAX_COMMAND_WORD_SIZE - 1 ){
+                                    if ( i > 0 && word[i-1] == '\r') word[i - 1] = '\0';
+                                    else word[i] = '\0';
+                                    CHECK_PERROR(write(toJobExecutor_pipe, " ", 1), "write to jobExecutor", )                   // send a white space
+                                    CHECK_PERROR(write(toJobExecutor_pipe, word, strlen(word)), "write to jobExecutor", )       // send word to jobExecutor
                                     break;
                                 }
                                 else if (prev == ' ' && word[i] == ' ' ){               // ignore continuous white space
@@ -273,42 +301,43 @@ int main(int argc, char *argv[]) {
                                 prev = word[i];
                                 i++;
                             }
+                            CHECK_PERROR(write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
                         }
-                        CHECK_PERROR(write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
-                        // read and send to socket jobExecutor's answer
-                        // IMPORTANT: jobExecutor must print (\n)"<END>\n" after each /search command's output so that we know here when to stop reading!
-                        char line[MAX_LINE_SIZE];
-                        bool line_too_big = false;
-                        for (;;){
-                            // read line-by-line
-                            i = 0;
-                            while( i < MAX_LINE_SIZE - 1 ){
-                                CHECK_PERROR(read(fromJobExecutor_pipe, line + i, 1), "read from jobExecutor", continue;)
-                                if ( line[i] == '\n' ){
-                                    if ( i > 0 && line[i-1] == '\r') line[i-1] = '\0';
-                                    else line[i] = '\0';
-                                    break;
-                                }
-                                i++;
-                            }
-                            if (i == MAX_LINE_SIZE - 1) {
-                                cerr << "Warning: an output line was too big for our buffer" << endl;
-                                line[i] = '\0';                 // the rest of it will be printed on the next loop?
-                                line_too_big = true;
-                            }
-                            if (strcmp(line, "<END>") == 0){
+                        else if ( strcmp(command, "WORDCOUNT") == 0 ){
+                            cout << "received WORDCOUNT command" << endl;
+                            // send /worcount command to jobExecutor
+                            CHECK_PERROR(write(toJobExecutor_pipe, "/wc\n", strlen("/wc\n")), "write to jobExecutor", )         // send "/wordcount" command
+                        }
+                        // read and send to socket jobExecutor's answer, whatever it was
+                        // IMPORTANT: jobExecutor must print (\n)"<\n" after each command's output so that we know here when to stop reading! Since html tags are ignored, this message wont be anywhere else in its answer!
+                        char buffer[BUFFER_SIZE];
+                        bool previous_chunk_ends_in_tag = false;
+                        for (;;) {
+                            ssize_t bytes_read;
+                            CHECK_PERROR((bytes_read = read(fromJobExecutor_pipe, buffer, BUFFER_SIZE)), "read from jobExecutor", break;)
+                            if (previous_chunk_ends_in_tag && bytes_read > 0 && buffer[0] == '\n'){
+                                if (bytes_read > 1) cerr << "Warning: jobExecutor sent more stuff after agreed upon \"<endl\"" << endl;
                                 break;
-                            } else{
-                                CHECK_PERROR( write(new_connection, line, strlen(line)), "write to accepted command socket", );
-                                if (!line_too_big) write(new_connection, "\n", 1);
-                                else line_too_big = false;     // reset this
                             }
+                            else previous_chunk_ends_in_tag = false;    // not really necessary since the only way to find "<" is followed by an "\n"
+                            if ( bytes_read >= 2 && buffer[bytes_read-2] == '<' && buffer[bytes_read-1] == '\n' ){   // if this was the last read from the jobExecutor's answer
+                                bytes_read -= 2;      // do not write "<\n" on output to socket
+                                if (bytes_read > 0){
+                                    CHECK_PERROR( write(new_connection, buffer, bytes_read), "write to accepted command socket", );
+                                }
+                                break;
+                            }
+                            else if ( bytes_read >= 1 && buffer[bytes_read-1] == '<' ){
+                                bytes_read--;        // do not write "<" on output socket
+                                previous_chunk_ends_in_tag = true;
+                            }
+                            CHECK_PERROR( write(new_connection, buffer, bytes_read), "write to accepted command socket", );
                         }
                     }
                 }
                 else{
                     cout << "Received illegal command: " << command << endl;     // (!) keep in mind that white spaces sent at start are also considered illegal
-                    write(new_connection, "illegal command\n", strlen("illegal command\n"));
+                    CHECK_PERROR( write(new_connection, "illegal command\n", strlen("illegal command\n")) , "write to accepted command socket", )
                 }
                 CHECK_PERROR( close(new_connection), "closing accepted command connection", )
             }
@@ -337,7 +366,8 @@ int main(int argc, char *argv[]) {
     delete[] starting_url;
 
     if (!monitor_forced_exit && alldirs->get_size() > 0) {          // if jobExecutor was initialized in the first place
-        CHECK_PERROR(write(toJobExecutor_pipe, "/exit\n", strlen("/exit\n")), "write \"/exit\" to jobExecutor failed",)         // tell jobExecutor to stop
+        // tell jobExecutor to stop
+        CHECK_PERROR(write(toJobExecutor_pipe, "/exit\n", strlen("/exit\n")), "write \"/exit\" to jobExecutor failed", )
         int stat;
         waitpid(jobExecutor_pid, &stat, 0);
         if (stat != 0) {

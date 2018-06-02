@@ -30,7 +30,7 @@ str_history::~str_history() {
     }
 }
 
-void str_history::add(const char *str) {       // O(logn)
+void str_history::add(const char *str) {        // O(logn)
     this->acquire();            // lock the mutex
     if (head == NULL){
         size++;
@@ -61,12 +61,12 @@ void str_history::add(const char *str) {       // O(logn)
 }
 
 bool str_history::search(const char *str) {      // O(logn)
-    this->acquire();          // lock the mutex
+    this->acquire();           // lock the mutex
     if (head == NULL) { this->release(); return false; }
     histNode *pos = head;
     for (;;) {
         if ( strcmp(str, pos->str) == 0 ){
-            this->release();  // unlock the mutex
+            this->release();   // unlock the mutex
             return true;
         }
         else if ( strcmp(str, pos->str) < 0 ){

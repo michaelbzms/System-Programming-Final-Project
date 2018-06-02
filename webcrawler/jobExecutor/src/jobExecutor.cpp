@@ -498,7 +498,7 @@ int main(int argc, char *argv[]) {
                 }
                 // print output
                 cout << maxfpath;
-                if ( max != -1) cout << "  count: " << max << endl;
+                if ( max != -1) cout << "  count: " << max;
                 cout << endl;
                 delete[] maxfpath;
                 if ( deadcount > 0 ) cout << deadcount << " out of " << numWorkers << " workers did not answer because they were forced to terminate" << endl;
@@ -624,7 +624,7 @@ int main(int argc, char *argv[]) {
                 }
                 // print output
                 cout << minfpath;
-                if ( min != INT_MAX ) cout << "  count: " << min << endl;
+                if ( min != INT_MAX ) cout << "  count: " << min;
                 cout << endl;
                 delete[] minfpath;
                 if ( deadcount > 0 ) cout << deadcount << " out of " << numWorkers << " workers did not answer because they were forced to terminate" << endl;
@@ -690,8 +690,8 @@ int main(int argc, char *argv[]) {
             cin.ignore(numeric_limits<streamsize>::max(), '\n');
         }
 
-        // VERY IMPORTANT: AT THE END OF EACH COMMAND print "<END>\n" to cout so that webcrawler knows that the command answer has finished!
-        cout << "<END>\n";
+        // VERY IMPORTANT: AT THE END OF EACH COMMAND print "<\n" to cout so that webcrawler knows that the command answer has finished!
+        cout << "<\n";    // '<' since tags are ignored as a code symbol to stop, '\n' to fflush stdout`
 
         // replace all dead workers:
         if ( a_worker_died ) {

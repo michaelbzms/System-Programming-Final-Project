@@ -9,12 +9,10 @@
 #include "../headers/FIFO_Queue.h"
 #include "../headers/crawling_monitoring.h"
 #include "../headers/str_history.h"
+#include "../headers/executables_paths.h"
 
 
 using namespace std;
-
-
-#define JOBEXECUTOR_PATH "./jobExecutor/bin/jobExecutor"
 
 
 /* useful macros */
@@ -22,7 +20,7 @@ using namespace std;
 #define CHECK(call, callname, handle_code) { if ( ( call ) < 0 ) { cerr << (callname) << " failed" << endl; handle_code } }
 
 
-/* Global Variables */
+/* Global Variables (explained at webcrawler.cpp) */
 extern bool crawling_has_finished;
 extern pthread_cond_t crawlingFinished;
 extern pthread_mutex_t crawlingFinishedLock;
@@ -39,19 +37,19 @@ int toJobExecutor_pipe = -1, fromJobExecutor_pipe = -1;
 
 
 /* Local Functions */
-void init_jobExecutor(int numOfWorkers, const char *docfile);
+void init_jobExecutor(int numOfWorkers);
 
 
 void *monitor_crawling(void *args){
     struct monitor_args *arguements = (struct monitor_args *) args;
 
-    // make sure to ignore SIGPIPE
+    // make sure to ignore SIGPIPE just in case
     struct sigaction act;
     memset(&act, 0, sizeof(act));
     act.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &act, NULL);
 
-    // Step1: block on cond_wait until crawling has finished, signaled every time it's possible for crawling to have finished
+    // Step1: block on cond_wait until crawling has finished
     CHECK( pthread_mutex_lock(&crawlingFinishedLock) , "pthread_mutex_lock", )        // lock crawling_has_finished's mutex
     // webcrawling has finished when:
     // 1) urlQueue is empty, and
@@ -63,9 +61,10 @@ void *monitor_crawling(void *args){
     }
     CHECK( pthread_mutex_unlock(&crawlingFinishedLock) , "pthread_mutex_unlock", )    // unlock crawling_has_finished's mutex
 
-    cout << ((monitor_forced_exit) ? "Web crawling did not finish in time but forced to shutdown..." : "Web crawling finished!") << endl;
+    // print diagnostic message on cout
+    cout << "monitor thread: " << ((monitor_forced_exit) ? "Web crawling did not finish in time but forced to shutdown..." : "Web crawling finished!") << endl;
 
-    // Step2: join with the num_of_threads threads, whose job is either finished or forced to finish via early SHUTDOWN command
+    // Step2: join with the num_of_threads threads, whose job is either finished or forced to finish prematurely via early SHUTDOWN command
     threads_must_terminate = true;
     urlQueue->acquire();                           // (!) locking urlQueue's lock before the broadcast is important to avoid a thread missing it!
     CHECK( pthread_cond_broadcast(&QueueIsEmpty), "pthread_cond_broadcast",  )        // broadcast all threads so they can get unstuck from cond_wait and terminate
@@ -78,17 +77,18 @@ void *monitor_crawling(void *args){
 
     // Step3: initiate the jobExecutor, but only if there are directories for him to index
     if (!monitor_forced_exit && alldirs->get_size() > 0){                             // web crawling has finished here so get_size() is "atomic"
-        cout << "Initiating jobExecutor..." << endl;
-        init_jobExecutor(arguements->num_of_workers, save_dir);
-        cout << "jobExecutor ready for commands" << endl;
+        init_jobExecutor(arguements->num_of_workers);
+        cout << "monitor thread: " << "jobExecutor ready for commands" << endl;
         jobExecutorReadyForCommands = true;
-    }
+    } else if ( alldirs->get_size() == 0 ){
+        cout << "monitor thread: " << "jobExecutor will NOT be initialized as there aren't any folders to use him on" << endl;
+    } else cout << "monitor thread: " << "jobExecutor will NOT be initialized as this thread was forced to exit" << endl;
 
     return NULL;
 }
 
 
-void init_jobExecutor(int numOfWorkers, const char *docfile){        // called by monitor thead when it's time to initiate the jobExecutor
+void init_jobExecutor(int numOfWorkers) {        // called by monitor thead when it's time to initiate the jobExecutor
     int crawler_to_jobExectutor_pipe[2];
     int jobExectutor_to_crawler_pipe[2];
     CHECK_PERROR( pipe(crawler_to_jobExectutor_pipe) , "pipe creation", return; )
@@ -98,6 +98,7 @@ void init_jobExecutor(int numOfWorkers, const char *docfile){        // called b
     pid_t pid;
     CHECK_PERROR( (pid = fork()), "fork jobExecutor", cerr << "Warning: jobExecutor could not be initialized" << endl; return; )
     if ( pid == 0 ){       // child
+        // redirect stdin and stdout for jobExecutor
         dup2(crawler_to_jobExectutor_pipe[0], STDIN_FILENO);        // make stdin the 1st pipe's read end for the about-to-be-execed process
         close(crawler_to_jobExectutor_pipe[0]);
         close(crawler_to_jobExectutor_pipe[1]);
@@ -107,22 +108,27 @@ void init_jobExecutor(int numOfWorkers, const char *docfile){        // called b
         execl(JOBEXECUTOR_PATH, "jobExecutor", numWorkers_str, NULL);
         /* Code continues to run only if exec fails: (most likely because the executable file could not be found) */
         perror("exec() failed");
-        exit(-1);          // this exit may have leaks, but we do not want the fork process to continue as is (so make sure exec's path is correct)
+        exit(-404);        // this exit may have leaks (maybe not since the OS does a lazy-copy of the address space for fork()), but under no circumstances do we want the fork process to continue as is (so make sure exec's path is correct)
     } else {               // parent
+        // save jobExecutor's pid
         jobExecutor_pid = pid;
+
+        // duplicate pipe's file descriptors to global counterparts
         toJobExecutor_pipe = dup(crawler_to_jobExectutor_pipe[1]);
         close(crawler_to_jobExectutor_pipe[0]);
         close(crawler_to_jobExectutor_pipe[1]);
         fromJobExecutor_pipe = dup(jobExectutor_to_crawler_pipe[0]);
         close(jobExectutor_to_crawler_pipe[0]);
         close(jobExectutor_to_crawler_pipe[1]);
-        // send jobExecutor terminal width (only possible at start)
+
+        // send jobExecutor terminal width (only possible at start) for him to use for /search, since he hasn't have access to the "real" stdout
         struct winsize wsize;
         CHECK_PERROR(ioctl(STDOUT_FILENO, TIOCGWINSZ, &wsize) , "ioctl for getting terminal width failed", wsize.ws_col = 120; /*default value*/ )
         int term_width = wsize.ws_col;
         CHECK_PERROR(write(toJobExecutor_pipe, &term_width, sizeof(int)), "write to jobExecutor", )
+
         // send jobExecutor the directories he ll be responsible for
-        cout << "Initiating jobExecutor with " << alldirs->get_size() << " site directories..." << endl;    // web crawling has finished here so get_size() is "atomic"
+        cout << "monitor thread: " << "Initializing jobExecutor with " << alldirs->get_size() << " site directories:" << endl;    // web crawling has finished here so get_size() is "atomic"
         char **directories = alldirs->get_all_strings_as_table();
         int dirsize = alldirs->get_size();
         CHECK_PERROR(write(toJobExecutor_pipe, &dirsize, sizeof(int)), "write to jobExecutor", )
