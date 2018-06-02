@@ -32,18 +32,9 @@ extern unsigned int total_bytes_returned;
 
 
 /* Local functions */
-bool check_if_valid(char *http_request_str, char *&filename);           // checks if http get request header is valid (1. 1st line is "HTTP/1.1 GET <link>", 2. There is a "Host:" field)
+bool check_if_valid(char *http_request_str, char *&filename);           // checks if http get request header is valid (<=> 1. 1st line is "HTTP/1.1 GET <link>", 2. There is a "Host:" field), 3. Every field header ends in ':')
 char *get_current_time(struct tm *timestamp, char *date_and_time);      // returns a pointer to date_and_time argument which is filled with current time information according to the RFC protocol for TCP
-void buffercpy(char *dest, const char *source, size_t bytes_read);
-size_t bufferlen(const char *buf);
-
-
-/* Local data structures */
-struct chunk{                                           // we store the whole page requested on a list of these chunks so that we only read each file ONCE
-    char buffer[BUFFER_SIZE];
-    chunk *next;
-    chunk() : next(NULL), buffer("") {}
-};
+size_t bufferlen(const char *buf);                      // returns BUFFER_SIZE except if it comes across a '\0' in which case it returns the size of the string before it without it
 
 
 void *handle_http_requests(void *arguements){
@@ -51,6 +42,7 @@ void *handle_http_requests(void *arguements){
     struct tm timestamp;                                // each thread has its own, to be used by gmtime_r on get_current_time()
     char date_and_time[256];                            // ^^ (same)
     while (!server_must_terminate){
+        // try to pop a file descriptor from the serve_request_buffer, if not possible block
         serve_request_buffer->acquire();                // lock the mutex
         while ( serve_request_buffer->isEmpty() ){
             CHECK( pthread_cond_wait(&bufferIsReady, &serve_request_buffer->lock) , "pthread_cond_wait" , )
@@ -64,7 +56,7 @@ void *handle_http_requests(void *arguements){
         if ( request_fd < 0 ) cerr << "Warning: could not pop an element from the request buffer even though it should not be empty" << endl;
         serve_request_buffer->release();                // unlock the mutex
 
-        // read http get request
+        // read http get request from popped file descriptor
         char http_request_str[MAX_GET_REQUEST_BUFFER_LEN];
         int i = 0;
         ssize_t nbytes = 0;
@@ -122,41 +114,30 @@ void *handle_http_requests(void *arguements){
                     perror("Error at fopening a requested page");
                 }
             } else {
-                // read the requested page from the disk into a chunk list in memory
-                // this is done because we have to send a header which contains their total "content_length" before we sent the file itself
-                // in this way we read the whole file sequentially only once onto memory (and then we send the header + the page over the socket in an http OK 200 answer)
-                size_t content_length = 0;
+                // get html's file size
+                long content_length = 0;
+                long pos = ftell(page);              // current position
+                fseek(page, 0, SEEK_END);            // go to end of file
+                content_length = ftell(page);        // read the position which is the size of the file
+                fseek(page, pos, SEEK_SET);          // restore original position
+                // write the 200 OK response header with the appropriate content_length
+                char header[1024];
+                sprintf(header, "HTTP/1.1 200 OK\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n", get_current_time(&timestamp, date_and_time), content_length);
+                CHECK_PERROR( write(request_fd, header, strlen(header)), "write to serving socket", break; );
+                // write the page itself chunk-by-chunk using a buffer
                 char buffer[BUFFER_SIZE];
                 size_t bytes_read;
-                chunk *chunklist = NULL, *temp = NULL;
                 for (;;) {                                // read file using a buffer and create a list of chunks that make up the requested page
                     CHECK_PERROR( (bytes_read = fread(buffer, 1, BUFFER_SIZE, page)), "read from page's html file", break; )
+                    if ( bytes_read < BUFFER_SIZE )  // if read less than BUFFER_SIZE data then
+                        buffer[bytes_read] = '\0';   // put a '\0' at the end so that bufferlen will "save us" from writting garbage from a previous read (useful for last write)
                     if ( bytes_read > 0 ) {
-                        content_length += bytes_read;
-                        if (chunklist == NULL) {
-                            chunklist = new chunk;
-                            buffercpy(chunklist->buffer, buffer, bytes_read);
-                            temp = chunklist;
-                        } else {
-                            temp->next = new chunk;
-                            temp = temp->next;
-                            buffercpy(temp->buffer, buffer, bytes_read);
-                        }
+                        // bufferlen guarantees that (nor the firsts nor) the last following writes will contain a '\0' at the end. We do not want a '\0' sent over the socket.
+                        CHECK_PERROR( write(request_fd, buffer, bufferlen(buffer)), "write to serving socket", break; )
                     }
                     if ( bytes_read < BUFFER_SIZE ) {
                         break;
                     }
-                }
-                // now use that chunk list to answer with a 200 OK http response and the requested file as its content
-                char header[512];
-                sprintf(header, "HTTP/1.1 200 OK\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n", get_current_time(&timestamp, date_and_time), content_length);
-                CHECK_PERROR( write(request_fd, header, strlen(header)), "write to serving socket", break; );
-                while ( chunklist != NULL ) {
-                    // the last write will contain the '\0' whilst the previous writes not, due to bufferlen
-                    CHECK_PERROR( write(request_fd, chunklist->buffer, bufferlen(chunklist->buffer)), "write to serving socket", break; )
-                    chunk *pre = chunklist;
-                    chunklist = chunklist->next;
-                    delete pre;
                 }
 
                 // update statistics (consistently using their lock)
@@ -196,7 +177,7 @@ bool check_if_valid(char *http_request_str, char *&filename) {   // This functio
                     if (j == 0 && strcmp(word, "GET") != 0) {
                         return false;
                     } else if (j == 1) {
-                        if ( strlen(word) >= 2 && word[0] == '.' && word[1] == '.' ){    // if GET message is of the form "../sitei/pagei_j.html" then
+                        if ( strlen(word) >= 2 && word[0] == '.' && word[1] == '.' ){         // if GET message is of the form "../sitei/pagei_j.html" then
                             filename = new char[strlen(word) - 2 + 1];     // copy filename without the two starting ".."
                             int i;
                             for ( i = 2 ; word[i] != '\0' ; i++ ){
@@ -221,7 +202,7 @@ bool check_if_valid(char *http_request_str, char *&filename) {   // This functio
                             return false;
                         }
                     }
-                    /* if (line[i] != '\0') */ j++;
+                    if (line[i] != '\0') j++;
                     word = &line[i];
                 } else if (i == length - 1 && strcmp(word, "HTTP/1.1") != 0){          // last word ('\0' already exists from strtok)
                     delete[] filename;
@@ -253,17 +234,6 @@ bool check_if_valid(char *http_request_str, char *&filename) {   // This functio
     else{
         delete[] filename;
         return false;
-    }
-}
-
-
-void buffercpy(char *dest, const char *source, size_t bytes_read) {    // both buffers must be of size BUFFER_SIZE
-    int i;
-    for ( i = 0 ; i < BUFFER_SIZE && i < bytes_read; i++){
-        dest[i] = source[i];
-    }
-    if ( i < BUFFER_SIZE ){   // i == bytes_read < BUFFER_SIZE
-        dest[i] = '\0';       // so that bufferlen called on dest will return the actual size of the chunk (this '/0' will not be carried over any socket)
     }
 }
 
