@@ -167,7 +167,7 @@ void *crawl(void *arguement){
             // make a TCP connection and send http get request for root_relative_url (which we got from parsing possibly_full_url) to the server_to_query
             int http_socket;
             CHECK_PERROR( (http_socket = socket(AF_INET, SOCK_STREAM, 0)) , "socket", delete[] possibly_full_url; continue; )
-            CHECK_PERROR( connect(http_socket, (struct sockaddr *) server_to_query, sizeof(struct sockaddr_in)) , "connect", delete[] possibly_full_url; close(http_socket); continue; )
+            CHECK_PERROR( connect(http_socket, (struct sockaddr *) server_to_query, sizeof(struct sockaddr_in)) , "Connecting to server failed", delete[] possibly_full_url; close(http_socket); continue; )
             char request[512];
             sprintf(request, "GET %s HTTP/1.1\nHost: mycrawler\nAccept-Language: en-us\nConnection: Close\n\n", root_relative_url);
             CHECK_PERROR( write(http_socket, request, strlen(request)), "write", delete[] possibly_full_url; close(http_socket); continue; )

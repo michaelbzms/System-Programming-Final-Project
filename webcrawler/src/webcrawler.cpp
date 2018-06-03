@@ -20,6 +20,7 @@
 #include "../headers/crawling_monitoring.h"
 #include "../headers/executables_paths.h"
 
+
 using namespace std;
 
 
@@ -27,6 +28,7 @@ using namespace std;
 #define COMMAND_QUEUE_SIZE 20                // size of the queue for incoming TCP command connections (only one will be handled at a time)
 #define MAX_COMMAND_WORD_SIZE 256            // maximum size for a word in a command (for bigger words we will only keep the first 256 characters)
 #define BUFFER_SIZE 2048                     // size of the buffer used to read the jobExecutor's answers to commands
+#define MAX_ARGUMENT_WORD_SIZE 256           // the maximum size of a word argument for a jobExecutor command (used to estimate the buffer size for reading from the socket)
 
 
 /* useful macros */
@@ -60,13 +62,13 @@ extern int toJobExecutor_pipe, fromJobExecutor_pipe;   // file descriptors for w
 
 
 /* Local Functions */
-int parse_arguements(int argc, char *const *argv, char *&host_or_IP, uint16_t &server_port, uint16_t &command_port, int &num_of_threads, char *&save_dir, char *&starting_url);
+int parse_arguments(int argc, char *const *argv, char *&host_or_IP, uint16_t &server_port, uint16_t &command_port, int &num_of_threads, char *&save_dir, char *&starting_url);
 
 
 int main(int argc, char *argv[]) {
     time_crawler_started = time(NULL);
     // before doing anything else make sure that our paths to executable files are correct:
-    if( access(JOBEXECUTOR_PATH, F_OK ) < -1 ) {      // if jobExecutor's executable does not exist then we cannot run this program
+    if( access(JOBEXECUTOR_PATH, F_OK ) < 0 ) {      // if jobExecutor's executable does not exist then we cannot run this program
         cerr << "Error: jobExecutor's executable does not exist on #defined location" << endl;
         return -1;
     }
@@ -74,7 +76,7 @@ int main(int argc, char *argv[]) {
     char *host_or_IP = NULL, *starting_url = NULL;
     uint16_t server_port = 0, command_port = 0;
     int num_of_threads = -1;
-    if ( parse_arguements(argc, argv, host_or_IP, server_port, command_port, num_of_threads, save_dir, starting_url) < 0 ){
+    if (parse_arguments(argc, argv, host_or_IP, server_port, command_port, num_of_threads, save_dir, starting_url) < 0 ){
         cerr << "Invalid web crawler parameters" << endl;
         return -1;
     }
@@ -234,74 +236,66 @@ int main(int argc, char *argv[]) {
                     CHECK_PERROR( write(new_connection , response, strlen(response)), "write to accepted command socket", )
                 }
                 else if ( strcmp(command, "SEARCH") == 0 || strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0 || strcmp(command, "WORDCOUNT") == 0 ) {
-                    if (!jobExecutorReadyForCommands && alldirs->get_size() == 0){   // get_size is not atomic, but this is harmless since we only read the size variable (it will not affect other threads)
-                        char msg[] = "web crawler found and downloaded 0 pages, hence jobExecutor commands cannot be used\n";
+                    if (alldirs->get_size() == 0){   // get_size is not atomic, but this is harmless since we only read the size variable (it will not affect other threads)
+                        char msg[] = "web crawler found and downloaded 0 pages, hence jobExecutor commands cannot be used\n";   // jobExecutor will not be initialized if this is the case
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
                     } else if (!jobExecutorReadyForCommands){
                         char msg[] = "web crawling is still in progress (or jobExecutor is not initialized yet)\n";
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
                     } else if (noMoreInput && (strcmp(command, "SEARCH") == 0 || strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0)){
-                        CHECK_PERROR( write(new_connection , "no arguments given\n", strlen("no arguments given\n")), "write to accepted command socket", )
+                        CHECK_PERROR( write(new_connection , "No arguments given\n", strlen("No arguments given\n")), "write to accepted command socket", )
                     } else {
                         if ( strcmp(command, "SEARCH") == 0 ){
                             cout << "received SEARCH command" << endl;
-                            // send /search command, along with a maximum of 10 word arguments, to jobExecutor
-                            CHECK_PERROR(write(toJobExecutor_pipe, "/search", strlen("/search")), "write to jobExecutor", )         // send "/search" command
-                            noMoreInput = false;
-                            while (!noMoreInput) {
-                                char word[MAX_COMMAND_WORD_SIZE];
-                                char prev = ' ';
-                                i = 0;
-                                while (i < MAX_COMMAND_WORD_SIZE) {
-                                    CHECK_PERROR(read(new_connection, word + i, 1), "read from accepted command socket", continue;)
-                                    if ( prev != ' ' && word[i] == ' ' ){
-                                        word[i] = '\0';
-                                        CHECK_PERROR(write(toJobExecutor_pipe, " ", 1), "write to jobExecutor", )                   // send a white space
-                                        CHECK_PERROR(write(toJobExecutor_pipe, word, strlen(word)), "write to jobExecutor", )       // send word to jobExecutor
+                            // send /search command along with any word arguments to the jobExecutor
+                            CHECK_PERROR(write(toJobExecutor_pipe, "/search ", strlen("/search ")), "write to jobExecutor", )         // send "/search" command
+                            char arguments[MAX_ARGUMENT_WORD_SIZE * 10 + 64];   // + 64 just in case there is a lot of whitespace between the words
+                            ssize_t bytes_read = 0, total_bytes_read = 0;
+                            bool stop = false;
+                            while( total_bytes_read < MAX_ARGUMENT_WORD_SIZE * 10 + 64 && !stop ){                // while not read '\n'
+                                CHECK_PERROR((bytes_read = read(new_connection, arguments + total_bytes_read, MAX_ARGUMENT_WORD_SIZE * 10 + 64 - total_bytes_read)), "read from accepted command socket", break; )
+                                for (int j = (int) total_bytes_read ; j < total_bytes_read + bytes_read ; j++){   // if found '\n' on data just read
+                                    if ( arguments[j] == '\n' ){
+                                        if ( j > 0 && arguments[j-1] == '\r') total_bytes_read = j - 1;
+                                        else total_bytes_read = j;
+                                        stop = true;                                                              // then stop reading
                                         break;
                                     }
-                                    else if ( word[i] == '\n' || i == MAX_COMMAND_WORD_SIZE - 1 ){         // last word or empty
-                                        if (i > 0) {                                                       // only send word if there was a word to send and not just whitespace
-                                            if (word[i - 1] == '\r') word[i - 1] = '\0';
-                                            else word[i] = '\0';
-                                            CHECK_PERROR(write(toJobExecutor_pipe, " ", 1), "write to jobExecutor", )               // send a white space
-                                            CHECK_PERROR(write(toJobExecutor_pipe, word, strlen(word)), "write to jobExecutor", )   // send word to jobExecutor
-                                        }
-                                        noMoreInput = true;
-                                        break;
-                                    }
-                                    else if (prev == ' ' && word[i] == ' ' ){               // ignore continuous white space
-                                        continue;
-                                    }
-                                    prev = word[i];
-                                    i++;
                                 }
+                                if (!stop) total_bytes_read += bytes_read;
                             }
-                            CHECK_PERROR(write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
+                            if ( total_bytes_read == MAX_ARGUMENT_WORD_SIZE * 10 + 64 ){
+                                cerr << "Warning: might not have read the whole arguments for this command (arguments too big)" << endl;
+                                if (arguments[MAX_ARGUMENT_WORD_SIZE * 10 + 64 - 1] == '\r') arguments[MAX_ARGUMENT_WORD_SIZE * 10 + 64 - 1] = ' ';
+                            }
+                            CHECK_PERROR( write(toJobExecutor_pipe, arguments, total_bytes_read), "write to jobExecutor", )
+                            CHECK_PERROR( write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
                         }
                         else if ( strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0){
                             cout << "received " << ((strcmp(command, "MAXCOUNT") == 0) ? "MAXCOUNT" : "MINCOUNT") << " command" << endl;
-                            // send /maxcount or /mincount command, along with one word arguement, to jobExecutor
-                            CHECK_PERROR(write(toJobExecutor_pipe, ((strcmp(command, "MAXCOUNT") == 0) ? "/maxcount" : "/mincount"), strlen("/maxcount")), "write to jobExecutor", )         // send "/maxcount" or "/mincount" command
-                            char word[MAX_COMMAND_WORD_SIZE];
-                            char prev = ' ';
-                            i = 0;
-                            while (i < MAX_COMMAND_WORD_SIZE) {
-                                CHECK_PERROR(read(new_connection, word + i, 1), "read from accepted command socket", continue;)
-                                if ( ( prev != ' ' && (word[i] == ' ' || word[i] == '\n') ) || i == MAX_COMMAND_WORD_SIZE - 1 ){
-                                    if ( i > 0 && word[i-1] == '\r') word[i - 1] = '\0';
-                                    else word[i] = '\0';
-                                    CHECK_PERROR(write(toJobExecutor_pipe, " ", 1), "write to jobExecutor", )                   // send a white space
-                                    CHECK_PERROR(write(toJobExecutor_pipe, word, strlen(word)), "write to jobExecutor", )       // send word to jobExecutor
-                                    break;
+                            // send /maxcount or /mincount command along with any word arguments to jobExecutor (if there are more than one words then jobExecutor will ignore any but the first)
+                            CHECK_PERROR(write(toJobExecutor_pipe, ((strcmp(command, "MAXCOUNT") == 0) ? "/maxcount " : "/mincount "), strlen("/maxcount ")), "write to jobExecutor", )         // send "/maxcount" or "/mincount" command
+                            char arguments[MAX_ARGUMENT_WORD_SIZE + 8];   // + 8 just in case there is a lot of whitespace before the first word
+                            ssize_t bytes_read = 0, total_bytes_read = 0;
+                            bool stop = false;
+                            while( total_bytes_read < MAX_ARGUMENT_WORD_SIZE + 8 && !stop ){                      // while not read '\n'
+                                CHECK_PERROR((bytes_read = read(new_connection, arguments + total_bytes_read, MAX_ARGUMENT_WORD_SIZE + 8 - total_bytes_read)), "read from accepted command socket", break; )
+                                for (int j = (int) total_bytes_read ; j < total_bytes_read + bytes_read ; j++){   // if found '\n' on data just read
+                                    if ( arguments[j] == '\n' ){
+                                        if ( j > 0 && arguments[j-1] == '\r') total_bytes_read = j - 1;
+                                        else total_bytes_read = j;
+                                        stop = true;                                                              // then stop reading
+                                        break;
+                                    }
                                 }
-                                else if (prev == ' ' && word[i] == ' ' ){               // ignore continuous white space
-                                    continue;
-                                }
-                                prev = word[i];
-                                i++;
+                                if (!stop) total_bytes_read += bytes_read;
                             }
-                            CHECK_PERROR(write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
+                            if ( total_bytes_read == MAX_ARGUMENT_WORD_SIZE + 8 ){
+                                cerr << "Warning: might not have read the whole arguments for this command (arguments too big)" << endl;
+                                if (arguments[MAX_ARGUMENT_WORD_SIZE + 8 - 1] == '\r') arguments[MAX_ARGUMENT_WORD_SIZE + 8 - 1] = ' ';
+                            }
+                            CHECK_PERROR( write(toJobExecutor_pipe, arguments, total_bytes_read), "write to jobExecutor", )
+                            CHECK_PERROR( write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
                         }
                         else if ( strcmp(command, "WORDCOUNT") == 0 ){
                             cout << "received WORDCOUNT command" << endl;
@@ -383,7 +377,7 @@ int main(int argc, char *argv[]) {
 
 
 /* Local Function Implementation */
-int parse_arguements(int argc, char *const *argv, char *&host_or_IP, uint16_t &server_port, uint16_t &command_port, int &num_of_threads, char *&save_dir, char *&starting_url) {
+int parse_arguments(int argc, char *const *argv, char *&host_or_IP, uint16_t &server_port, uint16_t &command_port, int &num_of_threads, char *&save_dir, char *&starting_url) {
     bool vital_params_given[4] = {false, false, false, false} , num_of_threads_given = false;
     for (int i = 1 ; i < argc - 1 ; i += 2){
         if ( strcmp(argv[i], "-h") == 0 && i + 1 < argc && argv[i+1][0] != '-' ){

@@ -28,11 +28,11 @@ extern pthread_cond_t bufferIsReady;
 extern bool server_must_terminate;
 extern pthread_mutex_t stat_lock;
 extern unsigned int total_pages_returned;
-extern unsigned int total_bytes_returned;
+extern unsigned long long int total_bytes_returned;
 
 
 /* Local functions */
-bool check_if_valid(char *http_request_str, char *&filename);           // checks if http get request header is valid (<=> 1. 1st line is "HTTP/1.1 GET <link>", 2. There is a "Host:" field), 3. Every field header ends in ':')
+bool check_if_valid(char *http_request_str, char *&filename);           // checks if http get request header is valid (<=> 1. 1st line is "HTTP/1.1 GET <link>", 2. There is a "Host:" field, 3. Every field header ends in ':')
 char *get_current_time(struct tm *timestamp, char *date_and_time);      // returns a pointer to date_and_time argument which is filled with current time information according to the RFC protocol for TCP
 size_t bufferlen(const char *buf);                      // returns BUFFER_SIZE except if it comes across a '\0' in which case it returns the size of the string before it without it
 
@@ -159,13 +159,13 @@ void *handle_http_requests(void *arguements){
 
 
 /* Local Functions Implementation */
-bool check_if_valid(char *http_request_str, char *&filename) {   // This function is kind of a mess but it works for all scenarios I checked it on. (Had I had more time I would have made it prettier)
+bool check_if_valid(char *http_request_str, char *&filename) {   // This function is a bit messy but it works for all scenarios I checked it on
     char *rest = http_request_str;
     bool host_field_exists = false;
     char *line;
     char *word;
     int k = 0;
-    while ((line = strtok_r(rest, "\r\n", &rest))) {             // strtok_r is thread safe. Only care about first two words
+    while ((line = strtok_r(rest, "\r\n", &rest))) {             // strtok_r is thread safe
         if (k == 0) {                                            // check if first line is an HTTP GET line
             word = &line[0];
             int j = 0;

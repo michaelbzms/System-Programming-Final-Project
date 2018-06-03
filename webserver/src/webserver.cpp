@@ -35,7 +35,7 @@ using namespace std;
 time_t time_server_started;
 pthread_mutex_t stat_lock;                         // mutex that protects access of global statistics variables
 unsigned int total_pages_returned = 0;
-unsigned int total_bytes_returned = 0;
+unsigned long long int total_bytes_returned = 0;   // this number can get really high really fast
 char *root_dir = NULL;
 ServeRequestBuffer *serve_request_buffer = NULL;   // a FIFO Queue of "unlimited" size is used as buffer for the accepted serving sockets' file descriptors
 pthread_cond_t bufferIsReady;                      // condition variable for whether the buffer is empty or not
@@ -171,7 +171,7 @@ int main(int argc, char *argv[]) {
                             time_t Dt = time(NULL) - time_server_started;
                             char response[256];
                             CHECK( pthread_mutex_lock(&stat_lock), "pthread_mutex_lock",  )            // must lock stats' mutex to access them consistently
-                            sprintf(response, "Server has been up for %.2zu:%.2zu:%.2zu, served %u pages, %u bytes\n", Dt / 3600, (Dt % 3600) / 60 , (Dt % 60), total_pages_returned, total_bytes_returned);
+                            sprintf(response, "Server has been up for %.2zu:%.2zu:%.2zu, served %u pages, %llu bytes\n", Dt / 3600, (Dt % 3600) / 60 , (Dt % 60), total_pages_returned, total_bytes_returned);
                             CHECK( pthread_mutex_unlock(&stat_lock), "pthread_mutex_unlock",  )
                             CHECK_PERROR( write(pfds[2].fd, response, strlen(response)) , "write response to accepted command socket" , )
                         }

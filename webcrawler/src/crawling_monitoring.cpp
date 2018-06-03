@@ -108,6 +108,7 @@ void init_jobExecutor(int numOfWorkers) {        // called by monitor thead when
         execl(JOBEXECUTOR_PATH, "jobExecutor", numWorkers_str, NULL);
         /* Code continues to run only if exec fails: (most likely because the executable file could not be found) */
         perror("exec() failed");
+        // flow should never reach here! JOBEXECUTOR_PATH should be valid as checked at the start of main!
         exit(-404);        // this exit may have leaks (maybe not since the OS does a lazy-copy of the address space for fork()), but under no circumstances do we want the fork process to continue as is (so make sure exec's path is correct)
     } else {               // parent
         // save jobExecutor's pid

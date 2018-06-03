@@ -321,313 +321,324 @@ int main(int argc, char *argv[]) {
             cin.clear();
             break;
         }
-        else if ( strcmp(command, "/search") == 0 ){          // maximum words for query are 10 (the rest are ignored)
-            int deadline = DEADLINE;
-            char **words = new char*[10];
-            int i = 0;
+        else if ( strcmp(command, "/search") == 0 ) {          // maximum words for query are 10 (the rest are ignored)
             ignore_whitespace(cin);
-            while ( cin.peek() != '\n' && i < 10 ) {
-                words[i] = new char[MAX_INPUT_WORD_LEN];
-                cin >> words[i];
-                ignore_whitespace(cin);
-                i++;
-                if (cin.fail()){
-                    cout << "Error: a word was too big?" << endl;
-                    cin.clear();
-                    break;
-                }
-            }
-            cin.ignore(numeric_limits<streamsize>::max(), '\n');
-            if (jobExecutor_must_terminate){
-                for (int j = 0 ; j < i ; j++){
-                    delete[] words[j];
-                }
-                delete[] words;
-                break;
-            }
-            // send request message to ALL workers (that contains the query)  (!) must not terminate whilst in the middle of sending a request (either send it all or none)!
-            Header header(SEARCH, i);                                             // header for how many words the search query has
-            for (int j = 0 ; j < numWorkers && !jobExecutor_must_terminate ; j++){
-                if (worker_is_dead[j]){
-                    worker_is_dead[j] = false;
-                    if ( replace_worker(j, Rpipes, Apipes, Rfds, Afds, range_in_str) == false ){
-                        cerr << "Failed to replace a worker!" << endl;
-                        worker_is_dead[j] = true;
-                    }
-                }
-                if ( write(Rfds[j], &header, sizeof(Header)) < 0 ) continue;      // worker died immediately?
-                for (int k = 0 ; k < i ; k++){
-                    Header wordhdr(NOT_USED, strlen(words[k]) + 1);
-                    if ( write(Rfds[j], &wordhdr, sizeof(Header)) < 0  ||         // header for each word
-                         write(Rfds[j], words[k], strlen(words[k]) + 1) < 0 ) {   // the word itself, where wordhdr.message_size == strlen(words[k]) + 1
+            if (cin.peek() == '\n') {
+                cout << "No arguments given" << endl;
+            } else {
+                int deadline = DEADLINE;
+                char **words = new char *[10];
+                int i = 0;
+                while (cin.peek() != '\n' && i < 10) {
+                    words[i] = new char[MAX_INPUT_WORD_LEN];
+                    cin >> words[i];
+                    ignore_whitespace(cin);
+                    i++;
+                    if (cin.fail()) {
+                        cout << "Error: a word was too big?" << endl;
+                        cin.clear();
                         break;
                     }
                 }
-            }
-            // wait for their responses - but only for deadline seconds - and print each result line:
-            bool feedback = search_management(numWorkers, Afds, deadline, words, i);
-            if (!feedback){                                                       // then jobExecutor must terminate
-                for (int j = 0 ; j < i ; j++){
+                cin.ignore(numeric_limits<streamsize>::max(), '\n');
+                if (jobExecutor_must_terminate) {
+                    for (int j = 0; j < i; j++) {
+                        delete[] words[j];
+                    }
+                    delete[] words;
+                    break;
+                }
+                // send request message to ALL workers (that contains the query)  (!) must not terminate whilst in the middle of sending a request (either send it all or none)!
+                Header header(SEARCH, i);                                             // header for how many words the search query has
+                for (int j = 0; j < numWorkers && !jobExecutor_must_terminate; j++) {
+                    if (worker_is_dead[j]) {
+                        worker_is_dead[j] = false;
+                        if (replace_worker(j, Rpipes, Apipes, Rfds, Afds, range_in_str) == false) {
+                            cerr << "Failed to replace a worker!" << endl;
+                            worker_is_dead[j] = true;
+                        }
+                    }
+                    if (write(Rfds[j], &header, sizeof(Header)) < 0) continue;      // worker died immediately?
+                    for (int k = 0; k < i; k++) {
+                        Header wordhdr(NOT_USED, strlen(words[k]) + 1);
+                        if (write(Rfds[j], &wordhdr, sizeof(Header)) < 0 ||         // header for each word
+                            write(Rfds[j], words[k], strlen(words[k]) + 1) < 0) {   // the word itself, where wordhdr.message_size == strlen(words[k]) + 1
+                            break;
+                        }
+                    }
+                }
+                // wait for their responses - but only for deadline seconds - and print each result line:
+                bool feedback = search_management(numWorkers, Afds, deadline, words, i);
+                if (!feedback) {                                                       // then jobExecutor must terminate
+                    for (int j = 0; j < i; j++) {
+                        delete[] words[j];
+                    }
+                    delete[] words;
+                    break;
+                }
+                for (int j = 0; j < i; j++) {
                     delete[] words[j];
                 }
                 delete[] words;
-                break;
             }
-            for (int j = 0 ; j < i ; j++){
-                delete[] words[j];
-            }
-            delete[] words;
         }
         else if ( strcmp(command, "/maxcount") == 0 ){
-            char keyword[MAX_INPUT_WORD_LEN];
-            cin >> keyword;
-            cin.ignore(numeric_limits<streamsize>::max(), '\n');
-            if (cin.fail()){
-                cout << "Error: input word too big?" << endl;
-                cin.clear();
-            }
-            else{
-                // send a request message to each worker
-                Header header(MAXCOUNT, strlen(keyword) + 1);
-                for (int i = 0 ; i < numWorkers && !jobExecutor_must_terminate ; i++){
-                    if (worker_is_dead[i]){                                       // last chance to replace any dead workers
-                        worker_is_dead[i] = false;
-                        if ( replace_worker(i, Rpipes, Apipes, Rfds, Afds, range_in_str) == false ){
-                            cerr << "Failed to replace a worker!" << endl;
-                            worker_is_dead[i] = true;
+            ignore_whitespace(cin);
+            if (cin.peek() == '\n') {
+                cout << "No arguments given" << endl;
+            } else {
+                char keyword[MAX_INPUT_WORD_LEN];
+                cin >> keyword;
+                cin.ignore(numeric_limits<streamsize>::max(), '\n');
+                if (cin.fail()) {
+                    cout << "Error: input word too big?" << endl;
+                    cin.clear();
+                } else {
+                    // send a request message to each worker
+                    Header header(MAXCOUNT, strlen(keyword) + 1);
+                    for (int i = 0; i < numWorkers && !jobExecutor_must_terminate; i++) {
+                        if (worker_is_dead[i]) {                                       // last chance to replace any dead workers
+                            worker_is_dead[i] = false;
+                            if (replace_worker(i, Rpipes, Apipes, Rfds, Afds, range_in_str) == false) {
+                                cerr << "Failed to replace a worker!" << endl;
+                                worker_is_dead[i] = true;
+                            }
                         }
+                        // if the i-th  worker dies right now the two following writes will fail but that's ok
+                        write(Rfds[i], &header, sizeof(Header));
+                        write(Rfds[i], keyword, strlen(keyword) + 1);
                     }
-                    // if the i-th  worker dies right now the two following writes will fail but that's ok
-                    write(Rfds[i], &header, sizeof(Header));
-                    write(Rfds[i], keyword, strlen(keyword) + 1);
-                }
-                if (jobExecutor_must_terminate){
-                    break;
-                }
-                // prepare for poll():
-                int deadcount = 0;
-                int max = -1;
-                char *maxfpath = new char[strlen("There is no text file containing given keyword") + 1];
-                strcpy(maxfpath, "There is no text file containing given keyword");
-                int retval;
-                struct pollfd *pfds = new struct pollfd[numWorkers];
-                for (int i = 0 ; i < numWorkers ; i++){
-                    pfds[i].fd = Afds[i];
-                    pfds[i].events = POLLIN;
-                    pfds[i].revents = 0;
-                }
-                bool *responded = new bool[numWorkers];                          // a bool table for which of the workers have responded
-                for (int i = 0 ; i < numWorkers ; i++) {
-                    responded[i] = false;
-                }
-                for (int k = 0 ; k < numWorkers && !jobExecutor_must_terminate; ){
-                    for (int i = 0 ; i < numWorkers ; i++){
-                        if ( !responded[i] && worker_is_dead[i] ) {
-                            // do not expect any answer from them!
-                            deadcount++;
-                            responded[i] = true;
-                            pfds[i].fd = -1;                                    // poll() can now ignore this file descriptor
-                            k++;
-                        }
-                    }
-                    if ( k >= numWorkers ){
+                    if (jobExecutor_must_terminate) {
                         break;
                     }
-                    retval = poll(pfds, numWorkers, -1);                        // wait indefinitely until all workers answer
-                    if ( retval < 0 ){
-                        if ( errno == EINTR && jobExecutor_must_terminate ) {   // terminating signal
-                            break;
-                        } else if (errno != EINTR) {
-                            perror("poll() failed");
-                        }
-                        // if errno == EINTR then a worker must have died - he will be accounted for in the start of the next loop
+                    // prepare for poll():
+                    int deadcount = 0;
+                    int max = -1;
+                    char *maxfpath = new char[strlen("There is no text file containing given keyword") + 1];
+                    strcpy(maxfpath, "There is no text file containing given keyword");
+                    int retval;
+                    struct pollfd *pfds = new struct pollfd[numWorkers];
+                    for (int i = 0; i < numWorkers; i++) {
+                        pfds[i].fd = Afds[i];
+                        pfds[i].events = POLLIN;
+                        pfds[i].revents = 0;
                     }
-                    else if ( retval == 0 ){        // should never have as time-out given is < 0
-                        cerr << "Unexpected return (0) from poll" << endl;
+                    bool *responded = new bool[numWorkers];                          // a bool table for which of the workers have responded
+                    for (int i = 0; i < numWorkers; i++) {
+                        responded[i] = false;
                     }
-                    else {                          // somebody answered
-                        for (int i = 0 ; i < numWorkers && !jobExecutor_must_terminate ; i++){
-                            if ( !responded[i] && (pfds[i].revents & POLLIN) ) {     // i-th worker has answered  (bit-wise and)
+                    for (int k = 0; k < numWorkers && !jobExecutor_must_terminate; ) {
+                        for (int i = 0; i < numWorkers; i++) {
+                            if (!responded[i] && worker_is_dead[i]) {
+                                // do not expect any answer from them!
+                                deadcount++;
                                 responded[i] = true;
                                 pfds[i].fd = -1;                                     // poll() can now ignore this file descriptor
                                 k++;
-                                ssize_t feedback;
-                                while ( (feedback = read(Afds[i], &header, sizeof(Header))) < 0 && errno == EINTR ) ;              // if interupted by a signal keep trying to read
-                                if (feedback > 0 && header.type == MAXCOUNT) {      // worker successfully executed /mincount
-                                    char *fpath = new char[header.message_size];
-                                    int maxcount = -1;
-                                    ssize_t bytes_read;
-                                    while ( ( bytes_read = read(Afds[i], fpath,  header.message_size) ) < 0 && errno == EINTR ) ;   // if interupted by a signal keep trying to read
-                                    if (bytes_read <= 0){
+                            }
+                        }
+                        if (k >= numWorkers) {
+                            break;
+                        }
+                        retval = poll(pfds, numWorkers, -1);                         // wait indefinitely until all workers answer
+                        if (retval < 0) {
+                            if (errno == EINTR && jobExecutor_must_terminate) {      // terminating signal
+                                break;
+                            } else if (errno != EINTR) {
+                                perror("poll() failed");
+                            }
+                            // if errno == EINTR then a worker must have died - he will be accounted for in the start of the next loop
+                        } else if (retval == 0) {         // should never have as time-out given is < 0
+                            cerr << "Unexpected return (0) from poll" << endl;
+                        } else {                          // somebody answered
+                            for (int i = 0; i < numWorkers && !jobExecutor_must_terminate; i++) {
+                                if (!responded[i] &&
+                                    (pfds[i].revents & POLLIN)) {       // i-th worker has answered  (bit-wise and)
+                                    responded[i] = true;
+                                    pfds[i].fd = -1;                                     // poll() can now ignore this file descriptor
+                                    k++;
+                                    ssize_t feedback;
+                                    while ((feedback = read(Afds[i], &header, sizeof(Header))) < 0 && errno == EINTR);     // if interupted by a signal keep trying to read
+                                    if (feedback > 0 &&
+                                        header.type == MAXCOUNT) {      // worker successfully executed /mincount
+                                        char *fpath = new char[header.message_size];
+                                        int maxcount = -1;
+                                        ssize_t bytes_read;
+                                        while ((bytes_read = read(Afds[i], fpath, header.message_size)) < 0 && errno == EINTR);      // if interupted by a signal keep trying to read
+                                        if (bytes_read <= 0) {
+                                            deadcount++;
+                                            delete[] fpath;
+                                            continue;
+                                        }
+                                        while ((bytes_read = read(Afds[i], &maxcount, sizeof(int))) < 0 && errno == EINTR);          // if interupted by a signal keep trying to read
+                                        if (bytes_read <= 0) {
+                                            deadcount++;
+                                            delete[] fpath;
+                                            continue;
+                                        }
+                                        if (maxcount > max || (maxcount == max && strcmp(fpath, maxfpath) < 0)) {
+                                            max = maxcount;
+                                            delete[] maxfpath;
+                                            maxfpath = fpath;
+                                        } else {
+                                            delete[] fpath;
+                                        }
+                                    } else if (feedback <= 0) {            // worker died
                                         deadcount++;
-                                        delete[] fpath;
-                                        continue;
+                                    } else if (header.type == ERROR) {     // should not happen
+                                        cerr << "maxcount failed on a worker!" << endl;
+                                    } else if (header.type != END_OF_MESSAGES) {
+                                        cerr << "Unknown header type at maxcount!" << endl;
                                     }
-                                    while ( ( bytes_read = read(Afds[i], &maxcount, sizeof(int)) ) < 0 && errno == EINTR ) ;        // if interupted by a signal keep trying to read
-                                    if (bytes_read <= 0){
-                                        deadcount++;
-                                        delete[] fpath;
-                                        continue;
-                                    }
-                                    if (maxcount > max || (maxcount == max && strcmp(fpath, maxfpath) < 0)) {
-                                        max = maxcount;
-                                        delete[] maxfpath;
-                                        maxfpath = fpath;
-                                    } else {
-                                        delete[] fpath;
-                                    }
-                                } else if ( feedback <= 0 ) {         // worker died
-                                    deadcount++;
+                                    // else if header.type == END_OF_MESSAGES then all of this worker's text files did not contain the keyword
                                 }
-                                else if (header.type == ERROR) {     // should not happen
-                                    cerr << "maxcount failed on a worker!" << endl;
-                                }
-                                else if (header.type != END_OF_MESSAGES){
-                                    cerr << "Unknown header type at maxcount!" << endl;
-                                }
-                                // else if header.type == END_OF_MESSAGES then all of this worker's text files did not contain the keyword
                             }
                         }
                     }
-                }
-                delete[] pfds;
-                delete[] responded;
-                if ( jobExecutor_must_terminate ){                  // received terminating signal
+                    delete[] pfds;
+                    delete[] responded;
+                    if (jobExecutor_must_terminate) {                  // received terminating signal
+                        delete[] maxfpath;
+                        break;
+                    }
+                    // print output
+                    cout << maxfpath;
+                    if (max != -1) cout << "  count: " << max;
+                    cout << endl;
                     delete[] maxfpath;
-                    break;
+                    if (deadcount > 0) cout << deadcount << " out of " << numWorkers << " workers did not answer because they were forced to terminate" << endl;
                 }
-                // print output
-                cout << maxfpath;
-                if ( max != -1) cout << "  count: " << max;
-                cout << endl;
-                delete[] maxfpath;
-                if ( deadcount > 0 ) cout << deadcount << " out of " << numWorkers << " workers did not answer because they were forced to terminate" << endl;
             }
         }
         else if ( strcmp(command, "/mincount") == 0 ){
-            char keyword[MAX_INPUT_WORD_LEN];
-            cin >> keyword;
-            cin.ignore(numeric_limits<streamsize>::max(), '\n');
-            if (cin.fail()){
-                cout << "Error: input word too big?" << endl;
-                cin.clear();
-            }
-            else{
-                // send a request message to each worker
-                Header header(MINCOUNT, strlen(keyword) + 1);
-                for (int i = 0 ; i < numWorkers && !jobExecutor_must_terminate ; i++){
-                    if (worker_is_dead[i]){                                    // last chance to replace any dead workers
-                        worker_is_dead[i] = false;
-                        if ( replace_worker(i, Rpipes, Apipes, Rfds, Afds, range_in_str) == false ){
-                            cerr << "Failed to replace a worker!" << endl;
-                            worker_is_dead[i] = true;
+            ignore_whitespace(cin);
+            if (cin.peek() == '\n') {
+                cout << "No arguments given" << endl;
+            } else {
+                char keyword[MAX_INPUT_WORD_LEN];
+                cin >> keyword;
+                cin.ignore(numeric_limits<streamsize>::max(), '\n');
+                if (cin.fail()){
+                    cout << "Error: input word too big?" << endl;
+                    cin.clear();
+                }
+                else{
+                    // send a request message to each worker
+                    Header header(MINCOUNT, strlen(keyword) + 1);
+                    for (int i = 0 ; i < numWorkers && !jobExecutor_must_terminate ; i++){
+                        if (worker_is_dead[i]){                                    // last chance to replace any dead workers
+                            worker_is_dead[i] = false;
+                            if ( replace_worker(i, Rpipes, Apipes, Rfds, Afds, range_in_str) == false ){
+                                cerr << "Failed to replace a worker!" << endl;
+                                worker_is_dead[i] = true;
+                            }
                         }
+                        // if the i-th  worker dies right now the two following writes will fail but that's ok
+                        write(Rfds[i], &header, sizeof(Header));
+                        write(Rfds[i], keyword, strlen(keyword) + 1);
                     }
-                    // if the i-th  worker dies right now the two following writes will fail but that's ok
-                    write(Rfds[i], &header, sizeof(Header));
-                    write(Rfds[i], keyword, strlen(keyword) + 1);
-                }
-                if (jobExecutor_must_terminate){
-                    break;
-                }
-                // prepare for poll():
-                int deadcount = 0;
-                int min = INT_MAX;
-                char *minfpath = new char[strlen("There is no text file containing given keyword") + 1];
-                strcpy(minfpath, "There is no text file containing given keyword");
-                int retval;
-                struct pollfd *pfds = new struct pollfd[numWorkers];
-                for (int i = 0 ; i < numWorkers ; i++){
-                    pfds[i].fd = Afds[i];
-                    pfds[i].events = POLLIN;
-                    pfds[i].revents = 0;
-                }
-                bool *responded = new bool[numWorkers];                       // a bool table for which of the workers have responded
-                for (int i = 0 ; i < numWorkers ; i++) {
-                    responded[i] = false;
-                }
-                for (int k = 0 ; k < numWorkers && !jobExecutor_must_terminate ; ){
-                    for (int i = 0 ; i < numWorkers ; i++){
-                        if ( !responded[i] && worker_is_dead[i] ) {
-                            // do not expect any answer from them!
-                            deadcount++;
-                            responded[i] = true;
-                            pfds[i].fd = -1;                                  // poll() can now ignore this file descriptor
-                            k++;
-                        }
-                    }
-                    if ( k >= numWorkers ){
+                    if (jobExecutor_must_terminate){
                         break;
                     }
-                    retval = poll(pfds, numWorkers, -1);                      // wait indefinitely until all workers answer
-                    if ( retval < 0 ) {
-                        if (errno == EINTR && jobExecutor_must_terminate) {   // terminating signal
-                            break;
-                        } else if (errno != EINTR) {
-                            perror("poll() failed");
-                        }
-                        // if errno == EINTR then a worker must have died - he will be accounted for in the start of the next loop
+                    // prepare for poll():
+                    int deadcount = 0;
+                    int min = INT_MAX;
+                    char *minfpath = new char[strlen("There is no text file containing given keyword") + 1];
+                    strcpy(minfpath, "There is no text file containing given keyword");
+                    int retval;
+                    struct pollfd *pfds = new struct pollfd[numWorkers];
+                    for (int i = 0 ; i < numWorkers ; i++){
+                        pfds[i].fd = Afds[i];
+                        pfds[i].events = POLLIN;
+                        pfds[i].revents = 0;
                     }
-                    else if ( retval == 0 ){                     // should never have as time-out given is < 0
-                        cerr << "Unexpected return (0) from poll" << endl;
+                    bool *responded = new bool[numWorkers];                       // a bool table for which of the workers have responded
+                    for (int i = 0 ; i < numWorkers ; i++) {
+                        responded[i] = false;
                     }
-                    else {                                       // somebody answered
-                        for (int i = 0 ; i < numWorkers && !jobExecutor_must_terminate ; i++){
-                            if ( !responded[i] && (pfds[i].revents & POLLIN) ) {     // i-th worker has answered  (bit-wise and)
+                    for (int k = 0 ; k < numWorkers && !jobExecutor_must_terminate ; ){
+                        for (int i = 0 ; i < numWorkers ; i++){
+                            if ( !responded[i] && worker_is_dead[i] ) {
+                                // do not expect any answer from them!
+                                deadcount++;
                                 responded[i] = true;
-                                pfds[i].fd = -1;                                     // poll() can now ignore this file descriptor
-                                k++;                                                 // increment the amount of workers that have answered (k)
-                                ssize_t feedback;
-                                while ( (feedback = read(Afds[i], &header, sizeof(Header))) < 0 && errno == EINTR ) ;              // if interupted by a signal keep trying to read
-                                if (feedback > 0 && header.type == MINCOUNT) {      // worker successfully executed /mincount
-                                    char *fpath = new char[header.message_size];
-                                    int mincount = -1;
-                                    ssize_t bytes_read;
-                                    while ( ( bytes_read = read(Afds[i], fpath,  header.message_size) ) < 0 && errno == EINTR ) ;   // if interupted by a signal keep trying to read
-                                    if (bytes_read <= 0){
+                                pfds[i].fd = -1;                                  // poll() can now ignore this file descriptor
+                                k++;
+                            }
+                        }
+                        if ( k >= numWorkers ){
+                            break;
+                        }
+                        retval = poll(pfds, numWorkers, -1);                      // wait indefinitely until all workers answer
+                        if ( retval < 0 ) {
+                            if (errno == EINTR && jobExecutor_must_terminate) {   // terminating signal
+                                break;
+                            } else if (errno != EINTR) {
+                                perror("poll() failed");
+                            }
+                            // if errno == EINTR then a worker must have died - he will be accounted for in the start of the next loop
+                        }
+                        else if ( retval == 0 ){                     // should never have as time-out given is < 0
+                            cerr << "Unexpected return (0) from poll" << endl;
+                        }
+                        else {                                       // somebody answered
+                            for (int i = 0 ; i < numWorkers && !jobExecutor_must_terminate ; i++){
+                                if ( !responded[i] && (pfds[i].revents & POLLIN) ) {     // i-th worker has answered  (bit-wise and)
+                                    responded[i] = true;
+                                    pfds[i].fd = -1;                                     // poll() can now ignore this file descriptor
+                                    k++;                                                 // increment the amount of workers that have answered (k)
+                                    ssize_t feedback;
+                                    while ( (feedback = read(Afds[i], &header, sizeof(Header))) < 0 && errno == EINTR ) ;              // if interupted by a signal keep trying to read
+                                    if (feedback > 0 && header.type == MINCOUNT) {      // worker successfully executed /mincount
+                                        char *fpath = new char[header.message_size];
+                                        int mincount = -1;
+                                        ssize_t bytes_read;
+                                        while ( ( bytes_read = read(Afds[i], fpath,  header.message_size) ) < 0 && errno == EINTR ) ;   // if interupted by a signal keep trying to read
+                                        if (bytes_read <= 0){
+                                            deadcount++;
+                                            delete[] fpath;
+                                            continue;
+                                        }
+                                        while ( ( bytes_read = read(Afds[i], &mincount, sizeof(int)) ) < 0 && errno == EINTR ) ;        // if interupted by a signal keep trying to read
+                                        if (bytes_read <= 0){
+                                            deadcount++;
+                                            delete[] fpath;
+                                            continue;
+                                        }
+                                        if (mincount < min || (mincount == min && strcmp(fpath, minfpath) < 0)) {
+                                            min = mincount;
+                                            delete[] minfpath;
+                                            minfpath = fpath;
+                                        } else {
+                                            delete[] fpath;
+                                        }
+                                    } else if ( feedback <= 0 ) {         // worker died
                                         deadcount++;
-                                        delete[] fpath;
-                                        continue;
                                     }
-                                    while ( ( bytes_read = read(Afds[i], &mincount, sizeof(int)) ) < 0 && errno == EINTR ) ;        // if interupted by a signal keep trying to read
-                                    if (bytes_read <= 0){
-                                        deadcount++;
-                                        delete[] fpath;
-                                        continue;
+                                    else if (header.type == ERROR) {     // should not happen
+                                        cerr << "mincount failed on a worker!" << endl;
                                     }
-                                    if (mincount < min || (mincount == min && strcmp(fpath, minfpath) < 0)) {
-                                        min = mincount;
-                                        delete[] minfpath;
-                                        minfpath = fpath;
-                                    } else {
-                                        delete[] fpath;
+                                    else if (header.type != END_OF_MESSAGES){
+                                        cerr << "Unknown header type at mincount!" << endl;
                                     }
-                                } else if ( feedback <= 0 ) {         // worker died
-                                    deadcount++;
+                                    // else if header.type == END_OF_MESSAGES then all of this worker's text files did not contain the keyword
                                 }
-                                else if (header.type == ERROR) {     // should not happen
-                                    cerr << "mincount failed on a worker!" << endl;
-                                }
-                                else if (header.type != END_OF_MESSAGES){
-                                    cerr << "Unknown header type at mincount!" << endl;
-                                }
-                                // else if header.type == END_OF_MESSAGES then all of this worker's text files did not contain the keyword
                             }
                         }
                     }
-                }
-                delete[] pfds;
-                delete[] responded;
-                if ( jobExecutor_must_terminate ){                   // received terminating signal
+                    delete[] pfds;
+                    delete[] responded;
+                    if ( jobExecutor_must_terminate ){                   // received terminating signal
+                        delete[] minfpath;
+                        break;
+                    }
+                    // print output
+                    cout << minfpath;
+                    if ( min != INT_MAX ) cout << "  count: " << min;
+                    cout << endl;
                     delete[] minfpath;
-                    break;
+                    if ( deadcount > 0 ) cout << deadcount << " out of " << numWorkers << " workers did not answer because they were forced to terminate" << endl;
                 }
-                // print output
-                cout << minfpath;
-                if ( min != INT_MAX ) cout << "  count: " << min;
-                cout << endl;
-                delete[] minfpath;
-                if ( deadcount > 0 ) cout << deadcount << " out of " << numWorkers << " workers did not answer because they were forced to terminate" << endl;
             }
         }
         else if ( strcmp(command, "/wc") == 0 ){
@@ -690,7 +701,7 @@ int main(int argc, char *argv[]) {
             cin.ignore(numeric_limits<streamsize>::max(), '\n');
         }
 
-        // VERY IMPORTANT: AT THE END OF EACH COMMAND print "<\n" to cout so that webcrawler knows that the command answer has finished!
+        // (!) VERY IMPORTANT: AT THE END OF EACH COMMAND print "<\n" to cout so that webcrawler knows that the command answer has finished!
         cout << "<\n";    // '<' since tags are ignored as a code symbol to stop, '\n' to fflush stdout`
 
         // replace all dead workers:

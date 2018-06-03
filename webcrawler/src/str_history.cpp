@@ -111,6 +111,6 @@ void str_history::release() {
     }
 }
 
-unsigned int str_history::get_size() const {            // does not need mutex lock, only used by 1 thread
+unsigned int str_history::get_size() const {
     return size;
 }
