@@ -194,7 +194,7 @@ int main(int argc, char *argv[]) {
                 struct sockaddr_in incoming_sa;
                 socklen_t len = sizeof(incoming_sa);
                 CHECK_PERROR((new_connection = accept(command_socket_fd, (struct sockaddr *) &incoming_sa, &len)), "accept on command socket failed unexpectedly", break; )
-                cout << "Crawler accepted a (command) connection from " << inet_ntoa(incoming_sa.sin_addr) << " : " << incoming_sa.sin_port << endl;
+                cout << "> Crawler accepted a (command) connection from " << inet_ntoa(incoming_sa.sin_addr) << " : " << incoming_sa.sin_port << endl;
                 // read char-by-char (should be fine, worst case is 128 reads) until " " or "\n" and consider this a command
                 bool noMoreInput = false;
                 char command[128];
@@ -215,7 +215,7 @@ int main(int argc, char *argv[]) {
                 }
                 if ( i == 128 ) command[127] = '\0';      // if command was too big it's not going to be legal anyway
                 if ( strcmp(command, "SHUTDOWN") == 0 ){
-                    cout << "received SHUTDOWN command" << endl;
+                    cout << "> Received SHUTDOWN command" << endl;
                     CHECK( pthread_mutex_lock(&crawlingFinishedLock) , "pthread_mutex_lock", )           // lock crawling_has_finished's mutex
                     if ( !crawling_has_finished ){        // if web crawling has not finished yet then force it to
                         monitor_forced_exit = true;       // by setting this boolean to true
@@ -224,10 +224,16 @@ int main(int argc, char *argv[]) {
                         cout << "Exiting before web crawling finished..." << endl;
                     }
                     CHECK( pthread_mutex_unlock(&crawlingFinishedLock) , "pthread_mutex_unlock", )       // unlock crawling_has_finished's mutex
+                    if (!monitor_forced_exit && alldirs->get_size() > 0 && !jobExecutorReadyForCommands){    // if jobExecutor is not ready to receive "/exit" command yet
+                        char msg[] = "jobExecutor is initialized but not ready to receive \"/exit\" command yet\nCrawler will have to wait for him to be ready (example: finish text file parsing) in order to properly shutdown\n";
+                        CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
+                        cout << "Exiting before jobExecutor has finished getting ready for commands..." << endl;
+                    }
+                    CHECK_PERROR( close(new_connection), "closing accepted command connection", )
                     break;
                 }
                 else if ( strcmp(command, "STATS") == 0 ){
-                    cout << "received STATS command" << endl;
+                    cout << "> Received STATS command" << endl;
                     time_t Dt = time(NULL) - time_crawler_started;
                     char response[256];
                     CHECK( pthread_mutex_lock(&stat_lock), "pthread_mutex_lock",  )
@@ -236,17 +242,24 @@ int main(int argc, char *argv[]) {
                     CHECK_PERROR( write(new_connection , response, strlen(response)), "write to accepted command socket", )
                 }
                 else if ( strcmp(command, "SEARCH") == 0 || strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0 || strcmp(command, "WORDCOUNT") == 0 ) {
-                    if (alldirs->get_size() == 0){   // get_size is not atomic, but this is harmless since we only read the size variable (it will not affect other threads)
+                    if ( !crawling_has_finished ){          // if web crawling has not finished yet (no need to lock its mutex here - we do not affect any common data)
+                        char msg[] = "web crawling is still in progress\n";
+                        CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
+                    }
+                    else if (alldirs->get_size() == 0){     // get_size is not atomic, but this should be safe since we only read the size variable (it will not affect other threads)
                         char msg[] = "web crawler found and downloaded 0 pages, hence jobExecutor commands cannot be used\n";   // jobExecutor will not be initialized if this is the case
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
-                    } else if (!jobExecutorReadyForCommands){
-                        char msg[] = "web crawling is still in progress (or jobExecutor is not initialized yet)\n";
+                    }
+                    else if (!jobExecutorReadyForCommands){
+                        char msg[] = "jobExecutor is not ready for commands yet\nWorkers are probably still parsing their text files\n";
                         CHECK_PERROR( write(new_connection, msg, strlen(msg)), "write to accepted command socket", );
-                    } else if (noMoreInput && (strcmp(command, "SEARCH") == 0 || strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0)){
+                    }
+                    else if (noMoreInput && (strcmp(command, "SEARCH") == 0 || strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0)){
                         CHECK_PERROR( write(new_connection , "No arguments given\n", strlen("No arguments given\n")), "write to accepted command socket", )
-                    } else {
+                    }
+                    else {
                         if ( strcmp(command, "SEARCH") == 0 ){
-                            cout << "received SEARCH command" << endl;
+                            cout << "> Received SEARCH command" << endl;
                             // send /search command along with any word arguments to the jobExecutor
                             CHECK_PERROR(write(toJobExecutor_pipe, "/search ", strlen("/search ")), "write to jobExecutor", )         // send "/search" command
                             char arguments[MAX_ARGUMENT_WORD_SIZE * 10 + 64];   // + 64 just in case there is a lot of whitespace between the words
@@ -272,7 +285,7 @@ int main(int argc, char *argv[]) {
                             CHECK_PERROR( write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
                         }
                         else if ( strcmp(command, "MAXCOUNT") == 0 || strcmp(command, "MINCOUNT") == 0){
-                            cout << "received " << ((strcmp(command, "MAXCOUNT") == 0) ? "MAXCOUNT" : "MINCOUNT") << " command" << endl;
+                            cout << "> Received " << ((strcmp(command, "MAXCOUNT") == 0) ? "MAXCOUNT" : "MINCOUNT") << " command" << endl;
                             // send /maxcount or /mincount command along with any word arguments to jobExecutor (if there are more than one words then jobExecutor will ignore any but the first)
                             CHECK_PERROR(write(toJobExecutor_pipe, ((strcmp(command, "MAXCOUNT") == 0) ? "/maxcount " : "/mincount "), strlen("/maxcount ")), "write to jobExecutor", )         // send "/maxcount" or "/mincount" command
                             char arguments[MAX_ARGUMENT_WORD_SIZE + 8];   // + 8 just in case there is a lot of whitespace before the first word
@@ -298,7 +311,7 @@ int main(int argc, char *argv[]) {
                             CHECK_PERROR( write(toJobExecutor_pipe, "\n", 1), "write to jobExecutor", )
                         }
                         else if ( strcmp(command, "WORDCOUNT") == 0 ){
-                            cout << "received WORDCOUNT command" << endl;
+                            cout << "> Received WORDCOUNT command" << endl;
                             // send /worcount command to jobExecutor
                             CHECK_PERROR(write(toJobExecutor_pipe, "/wc\n", strlen("/wc\n")), "write to jobExecutor", )         // send "/wordcount" command
                         }
@@ -330,7 +343,7 @@ int main(int argc, char *argv[]) {
                     }
                 }
                 else{
-                    cout << "Received illegal command: " << command << endl;     // (!) keep in mind that white spaces sent at start are also considered illegal
+                    cout << "> Received illegal command: " << command << endl;     // (!) keep in mind that white spaces sent at start are also considered illegal
                     CHECK_PERROR( write(new_connection, "illegal command\n", strlen("illegal command\n")) , "write to accepted command socket", )
                 }
                 CHECK_PERROR( close(new_connection), "closing accepted command connection", )
@@ -343,23 +356,31 @@ int main(int argc, char *argv[]) {
 
     CHECK_PERROR( close(command_socket_fd), "closing command socket", )
 
+
+    delete urlHistory;
+    delete[] host_or_IP;
+    delete[] starting_url;
+
+    cout << "Waiting for monitoring thread to exit.." << endl;
+    if (!monitor_forced_exit && alldirs->get_size() > 0) cout << "(monitor thread will wait for the jobExecutor to be ready for an \"/exit\" command before exiting)" << endl;
     void *status;
     CHECK(pthread_join(monitor_tid, &status), "pthread_join monitor thread",)
     if (status != NULL) { cerr << "monitor thread terminated with an unexpected status" << endl; }
+    cout << "monitor thread exited!" << endl;
+
     CHECK( pthread_mutex_destroy(&crawlingFinishedLock) , "pthread_mutex_destroy" , )
     CHECK( pthread_cond_destroy(&crawlingFinished), "pthread_cond_destroy", )
+
+    // used by monitor thread:
+    delete[] save_dir;
+    delete urlQueue;
+    delete[] threadpool;
 
     CHECK( pthread_mutex_destroy(&stat_lock) , "pthread_mutex_destroy" , )
     CHECK( pthread_cond_destroy(&QueueIsEmpty), "pthread_cond_destroy", )
 
-    delete urlQueue;
-    delete urlHistory;
-    delete[] threadpool;
-    delete[] host_or_IP;
-    delete[] save_dir;
-    delete[] starting_url;
-
     if (!monitor_forced_exit && alldirs->get_size() > 0) {          // if jobExecutor was initialized in the first place
+        cout << "Waiting for jobExecutor to exit..." << endl;
         // tell jobExecutor to stop
         CHECK_PERROR(write(toJobExecutor_pipe, "/exit\n", strlen("/exit\n")), "write \"/exit\" to jobExecutor failed", )
         int stat;
@@ -367,9 +388,10 @@ int main(int argc, char *argv[]) {
         if (stat != 0) {
             cerr << "(!) jobExecutor terminated with status: " << stat << endl;
         }
+        cout << "jobExecutor exited!" << endl;
     }
 
-    delete alldirs;
+    delete alldirs;       // used in the if above
 
     return 0;
 }
@@ -444,7 +466,8 @@ int parse_arguments(int argc, char *const *argv, char *&host_or_IP, uint16_t &se
         delete[] save_dir;
         delete[] host_or_IP;
         return -5;
-    } else if ( slash_counter != 4 ) {                      // full http urls must have 4 '/'s in total: http://linux01.di.uoa.gr/sitei/pagei_j_html
+    }
+    else if (argv[argc-1][0] != '/' && slash_counter != 4 ) {                      // full http urls must have 4 '/'s in total: http://linux01.di.uoa.gr/sitei/pagei_j_html
         cerr << "starting url is a full http URL but is incorect. Should be of type: http://hostname[:port]/site/page.html" << endl;
         delete[] save_dir;
         delete[] host_or_IP;

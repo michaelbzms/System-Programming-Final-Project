@@ -37,6 +37,7 @@ int *workerNum_to_pid = NULL;    // a table of size numWorkers in which: workerN
 int numWorkers = -1;             // number of workers
 int term_width = -1;
 
+
 /* Global variables used by signal handlers */
 volatile bool a_worker_died = false;
 volatile bool jobExecutor_must_terminate = false;
@@ -292,6 +293,9 @@ int main(int argc, char *argv[]) {
             return -5;
         }
     }
+
+    // notify monitor thread of web crawler that jobExecutor is now ready to answer to commands
+    CHECK_PERROR( write(STDOUT_FILENO, "READY", strlen("READY")), "write to STDOUT (pipe)", )
 
     /* Endless loop repeatedly reads a command from the user after prompting him until "/exit" command */
     char command[INPUT_BUFFER_SIZE];

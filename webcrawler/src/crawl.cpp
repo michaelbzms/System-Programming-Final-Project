@@ -56,7 +56,7 @@ sockaddr_in look_up_addr_r(const char *host_or_IP, int port);
 
 void *crawl(void *arguement){
     const struct sockaddr_in &server_sa = *(((struct args *) arguement)->server_sa);    // this is a reference to server_sa from this thread's arguements
-    while (!threads_must_terminate) {
+    while (!threads_must_terminate) {                            // this check is inportant in case threads must terminate before web crawling has finished
         char *root_relative_url, *possibly_full_url = NULL;      // urls in the Queue could be both full http://... links and root relaive links depending on what we find
 
         urlQueue->acquire();                                     // lock urlQueue's mutex
@@ -277,7 +277,10 @@ void *crawl(void *arguement){
             total_bytes_downloaded += total_bytes_read;   // should be equal with content_length if everything goes well
             CHECK( pthread_mutex_unlock(&stat_lock), "pthread_mutex_unlock",  )
 
-            if (threads_must_terminate) break;
+            if (threads_must_terminate){                  // avoid crawling if we have to exit before crawling has finished
+                delete[] filepath;
+                break;
+            }
 
             // crawl for more links in the page we just downloaded and add them to urlQueue while signalling one thread for each link added
             crawl_for_links(filepath, server_sa);

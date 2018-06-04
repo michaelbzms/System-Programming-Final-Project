@@ -65,6 +65,7 @@ void *monitor_crawling(void *args){
     cout << "monitor thread: " << ((monitor_forced_exit) ? "Web crawling did not finish in time but forced to shutdown..." : "Web crawling finished!") << endl;
 
     // Step2: join with the num_of_threads threads, whose job is either finished or forced to finish prematurely via early SHUTDOWN command
+    // Note: that if a thread is not blocked on cond_wait then it will have to finish its job for that loop and then stop at outer while loop check because threads_must_terminate == true
     threads_must_terminate = true;
     urlQueue->acquire();                           // (!) locking urlQueue's lock before the broadcast is important to avoid a thread missing it!
     CHECK( pthread_cond_broadcast(&QueueIsEmpty), "pthread_cond_broadcast",  )        // broadcast all threads so they can get unstuck from cond_wait and terminate
@@ -78,11 +79,11 @@ void *monitor_crawling(void *args){
     // Step3: initiate the jobExecutor, but only if there are directories for him to index
     if (!monitor_forced_exit && alldirs->get_size() > 0){                             // web crawling has finished here so get_size() is "atomic"
         init_jobExecutor(arguements->num_of_workers);
-        cout << "monitor thread: " << "jobExecutor ready for commands" << endl;
+        cout << "monitor thread: jobExecutor ready for commands" << endl;
         jobExecutorReadyForCommands = true;
     } else if ( alldirs->get_size() == 0 ){
-        cout << "monitor thread: " << "jobExecutor will NOT be initialized as there aren't any folders to use him on" << endl;
-    } else cout << "monitor thread: " << "jobExecutor will NOT be initialized as this thread was forced to exit" << endl;
+        cout << "monitor thread: jobExecutor will NOT be initialized as there aren't any folders to use him on" << endl;
+    } else cout << "monitor thread: jobExecutor will NOT be initialized as this thread was forced to exit" << endl;
 
     return NULL;
 }
@@ -141,5 +142,14 @@ void init_jobExecutor(int numOfWorkers) {        // called by monitor thead when
             delete[] directories[i];
         }
         delete[] directories;
+
+        // block here until all of jobExecutor's workers have parsed their textfiles and jobExecutor is ready to answer commands (then he will sent a "READY" message)
+        char msg[strlen("READY")+1];
+        ssize_t nbytes;
+        CHECK_PERROR( (nbytes = read(fromJobExecutor_pipe, msg, strlen("READY"))) , "read \"READY\" from jobExecutor", )
+        msg[nbytes] = '\0';
+        if ( strcmp(msg, "READY") != 0 ){
+            cerr << "monitor thread: Unexpected message instead of \"READY\" from jobExecutor" << endl;
+        }
     }
 }
