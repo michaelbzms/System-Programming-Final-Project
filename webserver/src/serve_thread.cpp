@@ -104,12 +104,12 @@ void *handle_http_requests(void *arguements){
                     // answer with a 403 http response
                     char message[512];
                     sprintf(message, "HTTP/1.1 403 Forbidden\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Trying to access this file but I do not think can make it.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Trying to access this file but I do not think can make it.</html>\n"));
-                    CHECK_PERROR(write(request_fd, message, strlen(message) + 1), "write to serving socket",)
+                    CHECK_PERROR(write(request_fd, message, strlen(message)), "write to serving socket",)
                 } else if (errno == ENOENT) {              // requested file does not exist
                     // answer with a 404 http response
                     char message[512];
                     sprintf(message, "HTTP/1.1 404 Not Found\nDate: %s\nServer: myhttpd/1.0.0 (Ubuntu64)\nContent-Length: %zu\nContent-Type: text/html\nConnection: Closed\n\n<html>Sorry dude, could not find this file.</html>\n", get_current_time(&timestamp, date_and_time), sizeof("<html>Sorry dude, could not find this file.</html>\n"));
-                    CHECK_PERROR(write(request_fd, message, strlen(message) + 1), "write to serving socket",)
+                    CHECK_PERROR(write(request_fd, message, strlen(message)), "write to serving socket",)
                 } else {
                     perror("Error at fopening a requested page");
                 }
